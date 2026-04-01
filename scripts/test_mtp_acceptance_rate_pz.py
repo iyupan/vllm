@@ -207,11 +207,46 @@ def collect_spec_decode_metrics(llm, num_spec_tokens):
     return num_drafts, num_draft_tokens, num_accepted_tokens, acceptance_counts
 
 
-def print_report(args, num_prompts, total_output_tokens, elapsed,
-                 num_drafts, num_draft_tokens, num_accepted_tokens,
-                 acceptance_counts,
-                 total_thinking_tokens=0, total_response_tokens=0):
-    """Print a summary report."""
+def print_phase_report(phase_name, num_drafts, num_draft_tokens,
+                       num_accepted_tokens, acceptance_counts,
+                       num_output_tokens=0, elapsed=0.0):
+    """Print acceptance rate report for a single phase."""
+    print(f"\n--- {phase_name} ---")
+    print(f"  Output tokens:        {num_output_tokens}")
+    if elapsed > 0:
+        print(f"  Inference time:       {elapsed:.2f}s")
+        print(f"  Throughput:           {num_output_tokens / elapsed:.1f} tok/s")
+    print(f"  Num drafts:           {num_drafts}")
+    print(f"  Num draft tokens:     {num_draft_tokens}")
+    print(f"  Num accepted tokens:  {num_accepted_tokens}")
+
+    if num_draft_tokens > 0:
+        rate = (num_accepted_tokens / num_draft_tokens) * 100
+        print(f"  Acceptance rate:      {rate:.2f}%")
+    else:
+        print(f"  Acceptance rate:      N/A (no draft tokens)")
+
+    if num_drafts > 0:
+        length = 1 + (num_accepted_tokens / num_drafts)
+        print(f"  Mean accept length:   {length:.4f}")
+    else:
+        print(f"  Mean accept length:   N/A (no drafts)")
+
+    if acceptance_counts:
+        print(f"  Per-position acceptance rate:")
+        for i, count in enumerate(acceptance_counts):
+            r = count / num_drafts if num_drafts > 0 else 0
+            print(f"    Position {i}: {r:.4f} ({count}/{num_drafts})")
+
+
+def print_report(args, num_prompts, total_output_tokens, total_elapsed,
+                 total_metrics, thinking_metrics=None, response_metrics=None):
+    """Print a full summary report.
+
+    Each *_metrics is a tuple:
+        (num_drafts, num_draft_tokens, num_accepted_tokens,
+         acceptance_counts, num_output_tokens, elapsed)
+    """
     dataset_label = args.dataset
     if args.subset:
         dataset_label += f" / {args.subset}"
@@ -226,33 +261,24 @@ def print_report(args, num_prompts, total_output_tokens, elapsed,
     print(f"Num spec tokens:      {args.num_spec_tokens}")
     print(f"Thinking enabled:     {args.enable_thinking}")
     print(f"Total output tokens:  {total_output_tokens}")
-    if args.enable_thinking and total_thinking_tokens > 0:
-        print(f"  Thinking tokens:    {total_thinking_tokens}")
-        print(f"  Response tokens:    {total_response_tokens}")
-    print(f"Inference time:       {elapsed:.2f}s")
-    print(f"Throughput:           {total_output_tokens / elapsed:.1f} tok/s")
-    print("-" * 60)
-    print(f"Num drafts:           {num_drafts}")
-    print(f"Num draft tokens:     {num_draft_tokens}")
-    print(f"Num accepted tokens:  {num_accepted_tokens}")
+    print(f"Total inference time: {total_elapsed:.2f}s")
+    print(f"Total throughput:     {total_output_tokens / total_elapsed:.1f} tok/s")
 
-    if num_draft_tokens > 0:
-        acceptance_rate = (num_accepted_tokens / num_draft_tokens) * 100
-        print(f"Total acceptance rate:    {acceptance_rate:.2f}%")
-    else:
-        print("Total acceptance rate:    N/A (no draft tokens)")
+    # Overall
+    nd, ndt, nat, ac, _, _ = total_metrics
+    print_phase_report("Overall", nd, ndt, nat, ac,
+                       total_output_tokens, total_elapsed)
 
-    if num_drafts > 0:
-        acceptance_length = 1 + (num_accepted_tokens / num_drafts)
-        print(f"Mean acceptance length:   {acceptance_length:.4f}")
-    else:
-        print("Mean acceptance length:   N/A (no drafts)")
+    # Thinking phase
+    if thinking_metrics is not None:
+        nd, ndt, nat, ac, ntok, el = thinking_metrics
+        print_phase_report("Thinking Phase", nd, ndt, nat, ac, ntok, el)
 
-    print("-" * 60)
-    print("Per-position acceptance rate:")
-    for i, count in enumerate(acceptance_counts):
-        rate = count / num_drafts if num_drafts > 0 else 0
-        print(f"  Position {i}: {rate:.4f} ({count}/{num_drafts})")
+    # Response phase
+    if response_metrics is not None:
+        nd, ndt, nat, ac, ntok, el = response_metrics
+        print_phase_report("Response Phase", nd, ndt, nat, ac, ntok, el)
+
     print("=" * 60)
 
 
@@ -295,9 +321,12 @@ def parse_args():
     gen = parser.add_argument_group("generation")
     gen.add_argument("--max-tokens", type=int, default=1024,
                        help="Max output tokens per request (default: 1024)")
-    gen.add_argument("--temp", type=float, default=0.0)
-    gen.add_argument("--top-p", type=float, default=1.0)
-    gen.add_argument("--top-k", type=int, default=-1)
+    gen.add_argument("--temp", type=float, default=1.0)
+    gen.add_argument("--top-p", type=float, default=0.95)
+    gen.add_argument("--top-k", type=int, default=20)
+    gen.add_argument("--min-p", type=float, default=0.0)
+    gen.add_argument("--presence-penalty", type=float, default=1.5)
+    gen.add_argument("--repetition-penalty", type=float, default=1.0)
 
     # Thinking / reasoning
     think = parser.add_argument_group("thinking")
@@ -380,83 +409,193 @@ def main():
         **extra_kwargs,
     )
 
-    sampling_params = SamplingParams(
+    common_sampling_kwargs = dict(
         temperature=args.temp,
-        max_tokens=args.max_tokens,
         top_p=args.top_p,
         top_k=args.top_k,
+        min_p=args.min_p,
+        presence_penalty=args.presence_penalty,
+        repetition_penalty=args.repetition_penalty,
     )
 
     # ---- Run inference ----
     print(f"Running inference with MTP spec decoding "
           f"(num_spec_tokens={args.num_spec_tokens}) ...")
-    start = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params=sampling_params)
-    elapsed = time.perf_counter() - start
 
-    if args.print_output:
-        for i, output in enumerate(outputs):
-            text = output.outputs[0].text
-            thinking, response = split_thinking(text)
-            print("=" * 60)
-            print(f"[Prompt {i}] {texts[i][:200]}...")
-            if thinking is not None:
-                print(f"[Thinking] {thinking}")
-                print(f"[Response] {response}")
-            else:
-                print(f"[Output] {text}")
-
-    if args.save_output:
-        output_dir = os.path.dirname(args.save_output)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        records = []
-        for i, output in enumerate(outputs):
-            text = output.outputs[0].text
-            thinking, response = split_thinking(text)
-            record = {
-                "prompt": texts[i],
-                "output": text,
-                "num_tokens": len(output.outputs[0].token_ids),
-            }
-            if thinking is not None:
-                record["thinking"] = thinking
-                record["response"] = response
-            records.append(record)
-        with open(args.save_output, "w") as f:
-            json.dump(records, f, ensure_ascii=False, indent=2)
-        print(f"Saved {len(records)} outputs to {args.save_output}")
-
-    # ---- Collect & report metrics ----
-    total_output_tokens = sum(
-        len(o.outputs[0].token_ids) for o in outputs)
-
-    total_thinking_tokens = 0
-    total_response_tokens = 0
     if args.enable_thinking:
-        for output in outputs:
-            text = output.outputs[0].text
-            think_end = text.find("</think>")
-            if think_end != -1:
-                think_start = text.find("<think>")
-                think_text = text[think_start + len("<think>"):think_end] \
-                    if think_start != -1 else text[:think_end]
-                resp_text = text[think_end + len("</think>"):]
-                t_ids = tokenizer.encode(think_text, add_special_tokens=False)
-                r_ids = tokenizer.encode(resp_text, add_special_tokens=False)
-                total_thinking_tokens += len(t_ids)
-                total_response_tokens += len(r_ids)
-            else:
-                # No </think> found, count all as thinking (budget exhausted)
-                total_thinking_tokens += len(output.outputs[0].token_ids)
+        # ============================================================
+        # Two-phase generation: thinking and response are measured
+        # separately so we get per-phase acceptance rates.
+        # ============================================================
 
-    num_drafts, num_draft_tokens, num_accepted_tokens, acceptance_counts = \
-        collect_spec_decode_metrics(llm, args.num_spec_tokens)
+        # Phase 1: generate thinking only (stop at </think>)
+        thinking_params = SamplingParams(
+            max_tokens=args.max_tokens,
+            stop=["</think>"],
+            include_stop_str_in_output=True,
+            **common_sampling_kwargs,
+        )
 
-    print_report(args, len(prompts), total_output_tokens, elapsed,
-                 num_drafts, num_draft_tokens, num_accepted_tokens,
-                 acceptance_counts,
-                 total_thinking_tokens, total_response_tokens)
+        print("Phase 1: Generating thinking ...")
+        # Reset metrics baseline
+        metrics_before_think = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
+        t1 = time.perf_counter()
+        thinking_outputs = llm.generate(prompts, thinking_params)
+        t2 = time.perf_counter()
+        metrics_after_think = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
+        thinking_elapsed = t2 - t1
+
+        # Compute thinking-phase metric deltas
+        think_deltas = tuple(
+            a - b for a, b in zip(metrics_after_think[:3],
+                                  metrics_before_think[:3])
+        )
+        think_pos_deltas = [
+            a - b for a, b in zip(metrics_after_think[3],
+                                  metrics_before_think[3])
+        ]
+        thinking_output_tokens = sum(
+            len(o.outputs[0].token_ids) for o in thinking_outputs)
+
+        # Phase 2: continue generating response
+        # Build continued prompts: original prompt + thinking output
+        continued_prompts = []
+        for i, out in enumerate(thinking_outputs):
+            thinking_text = out.outputs[0].text
+            # If stop string wasn't in output, append it
+            if not thinking_text.rstrip().endswith("</think>"):
+                thinking_text += "</think>"
+            continued_prompts.append(prompts[i] + thinking_text)
+
+        response_params = SamplingParams(
+            max_tokens=args.max_tokens,
+            **common_sampling_kwargs,
+        )
+
+        print("Phase 2: Generating response ...")
+        metrics_before_resp = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
+        t3 = time.perf_counter()
+        response_outputs = llm.generate(continued_prompts, response_params)
+        t4 = time.perf_counter()
+        metrics_after_resp = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
+        response_elapsed = t4 - t3
+
+        # Compute response-phase metric deltas
+        resp_deltas = tuple(
+            a - b for a, b in zip(metrics_after_resp[:3],
+                                  metrics_before_resp[:3])
+        )
+        resp_pos_deltas = [
+            a - b for a, b in zip(metrics_after_resp[3],
+                                  metrics_before_resp[3])
+        ]
+        response_output_tokens = sum(
+            len(o.outputs[0].token_ids) for o in response_outputs)
+
+        total_elapsed = thinking_elapsed + response_elapsed
+        total_output_tokens = thinking_output_tokens + response_output_tokens
+
+        # Merge outputs for printing / saving
+        all_thinking_texts = []
+        all_response_texts = []
+        for i in range(len(prompts)):
+            t_text = thinking_outputs[i].outputs[0].text
+            # Strip </think> tag for clean thinking text
+            thinking_clean, _ = split_thinking(t_text)
+            if thinking_clean is None:
+                thinking_clean = t_text.replace("</think>", "").strip()
+            all_thinking_texts.append(thinking_clean)
+            all_response_texts.append(response_outputs[i].outputs[0].text)
+
+        if args.print_output:
+            for i in range(len(prompts)):
+                print("=" * 60)
+                print(f"[Prompt {i}] {texts[i][:200]}...")
+                print(f"[Thinking] {all_thinking_texts[i]}")
+                print(f"[Response] {all_response_texts[i]}")
+
+        if args.save_output:
+            output_dir = os.path.dirname(args.save_output)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            records = []
+            for i in range(len(prompts)):
+                records.append({
+                    "prompt": texts[i],
+                    "thinking": all_thinking_texts[i],
+                    "response": all_response_texts[i],
+                    "thinking_tokens": len(
+                        thinking_outputs[i].outputs[0].token_ids),
+                    "response_tokens": len(
+                        response_outputs[i].outputs[0].token_ids),
+                })
+            with open(args.save_output, "w") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+            print(f"Saved {len(records)} outputs to {args.save_output}")
+
+        # Overall metrics = sum of both phases
+        total_nd = think_deltas[0] + resp_deltas[0]
+        total_ndt = think_deltas[1] + resp_deltas[1]
+        total_nat = think_deltas[2] + resp_deltas[2]
+        total_pos = [a + b for a, b in zip(think_pos_deltas, resp_pos_deltas)]
+
+        total_metrics = (total_nd, total_ndt, total_nat,
+                         total_pos, total_output_tokens, total_elapsed)
+        thinking_metrics = (*think_deltas, think_pos_deltas,
+                            thinking_output_tokens, thinking_elapsed)
+        response_metrics = (*resp_deltas, resp_pos_deltas,
+                            response_output_tokens, response_elapsed)
+
+        print_report(args, len(prompts), total_output_tokens, total_elapsed,
+                     total_metrics, thinking_metrics, response_metrics)
+
+    else:
+        # ============================================================
+        # Single-phase generation (no thinking)
+        # ============================================================
+        sampling_params = SamplingParams(
+            max_tokens=args.max_tokens,
+            **common_sampling_kwargs,
+        )
+
+        start = time.perf_counter()
+        outputs = llm.generate(prompts, sampling_params=sampling_params)
+        elapsed = time.perf_counter() - start
+
+        total_output_tokens = sum(
+            len(o.outputs[0].token_ids) for o in outputs)
+
+        if args.print_output:
+            for i, output in enumerate(outputs):
+                print("=" * 60)
+                print(f"[Prompt {i}] {texts[i][:200]}...")
+                print(f"[Output] {output.outputs[0].text}")
+
+        if args.save_output:
+            output_dir = os.path.dirname(args.save_output)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            records = []
+            for i, output in enumerate(outputs):
+                records.append({
+                    "prompt": texts[i],
+                    "output": output.outputs[0].text,
+                    "num_tokens": len(output.outputs[0].token_ids),
+                })
+            with open(args.save_output, "w") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+            print(f"Saved {len(records)} outputs to {args.save_output}")
+
+        nd, ndt, nat, ac = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
+
+        total_metrics = (nd, ndt, nat, ac, total_output_tokens, elapsed)
+        print_report(args, len(prompts), total_output_tokens, elapsed,
+                     total_metrics)
 
 
 if __name__ == "__main__":
