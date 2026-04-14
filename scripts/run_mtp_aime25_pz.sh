@@ -12,7 +12,7 @@
 #        --max-tokens 32768 \
 #        --max-model-len 262144 \
 #        --tp 8 \
-#        --num-spec-tokens 2 \
+#        --num-spec-tokens 3 \
 #        --max-num-seqs 256 \
 #        --temp 0.0 \
 #        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768.json
@@ -28,7 +28,7 @@
 #        --max-tokens 32768 \
 #        --max-model-len 262144 \
 #        --tp 8 \
-#        --num-spec-tokens 2 \
+#        --num-spec-tokens 3 \
 #        --max-num-seqs 256 \
 #        --temp 1.0 \
 #        --top-p 0.95 \
@@ -36,7 +36,7 @@
 #        --min-p 0.0 \
 #        --presence-penalty 1.5 \
 #        --repetition-penalty 1.0 \
-#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-temp1.json
+#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-spec3-temp1.json
 
 # temp=0.6 (moderate sampling)
 python scripts/test_mtp_acceptance_rate_pz.py \
@@ -49,7 +49,7 @@ python scripts/test_mtp_acceptance_rate_pz.py \
         --max-tokens 32768 \
         --max-model-len 262144 \
         --tp 8 \
-        --num-spec-tokens 2 \
+        --num-spec-tokens 3 \
         --max-num-seqs 256 \
         --temp 0.6 \
         --top-p 0.95 \
@@ -57,4 +57,4 @@ python scripts/test_mtp_acceptance_rate_pz.py \
         --min-p 0.0 \
         --presence-penalty 0.0 \
         --repetition-penalty 1.0 \
-        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-temp0.6.json
+        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-spec3-temp0.6.json
