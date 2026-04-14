@@ -1,27 +1,11 @@
 #!/bin/bash
-# Test MTP acceptance rate on GPQA Diamond dataset
+# Test MTP acceptance rate on AIME 2025 dataset
 
-#MODEL_DIR=${1:?"Usage: $0 <model_dir> [num_spec_tokens] [tp]"}
-#NUM_SPEC_TOKENS=${2:-3}
-#TP=${3:-1}
-#
-#python scripts/test_mtp_acceptance_rate.py \
-#    --model-dir "$MODEL_DIR" \
-#    --dataset Idavidrein/gpqa \
-#    --subset gpqa_diamond \
-#    --split train \
-#    --text-column Question \
-#    --num-spec-tokens "$NUM_SPEC_TOKENS" \
-#    --tp "$TP" \
-#    --output-len 1024 \
-#    --temp 0.0
-
-#Thinking mode for general tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0
-
+# temp=0.0 (greedy)
 #python scripts/test_mtp_acceptance_rate_pz.py \
 #        --model-dir /public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B \
-#        --dataset Idavidrein/gpqa --subset gpqa_diamond --split train \
-#        --text-column Question \
+#        --dataset MathArena/aime_2025 --split train \
+#        --text-column problem \
 #        --mode chat \
 #        --enable-thinking \
 #        --reasoning-parser qwen3 \
@@ -31,12 +15,13 @@
 #        --num-spec-tokens 2 \
 #        --max-num-seqs 256 \
 #        --temp 0.0 \
-#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/gpqa_diamond/output-think-32768.json
-#
+#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768.json
+
+# temp=1.0 (thinking mode sampling)
 #python scripts/test_mtp_acceptance_rate_pz.py \
 #        --model-dir /public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B \
-#        --dataset Idavidrein/gpqa --subset gpqa_diamond --split train \
-#        --text-column Question \
+#        --dataset MathArena/aime_2025 --split train \
+#        --text-column problem \
 #        --mode chat \
 #        --enable-thinking \
 #        --reasoning-parser qwen3 \
@@ -51,12 +36,13 @@
 #        --min-p 0.0 \
 #        --presence-penalty 1.5 \
 #        --repetition-penalty 1.0 \
-#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/gpqa_diamond/output-think-32768-temp1.json
+#        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-temp1.json
 
+# temp=0.6 (moderate sampling)
 python scripts/test_mtp_acceptance_rate_pz.py \
         --model-dir /public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B \
-        --dataset Idavidrein/gpqa --subset gpqa_diamond --split train \
-        --text-column Question \
+        --dataset MathArena/aime_2025 --split train \
+        --text-column problem \
         --mode chat \
         --enable-thinking \
         --reasoning-parser qwen3 \
@@ -71,4 +57,4 @@ python scripts/test_mtp_acceptance_rate_pz.py \
         --min-p 0.0 \
         --presence-penalty 0.0 \
         --repetition-penalty 1.0 \
-        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/gpqa_diamond/output-think-32768-temp0.6.json
+        --save-output /extra_panyu/output_text_pz/Qwen/Qwen3.5-35B-A3B/aime25/output-think-32768-temp0.6.json
