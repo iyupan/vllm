@@ -3112,50 +3112,58 @@ class GPUModelRunner(
             sampling_metadata,
         )
 
-        # Top-k acceptance analysis: compare target model output tokens
-        # with the draft model's top-k predictions at each position.
+        # Top-k acceptance analysis: compare target model's independent
+        # prediction (argmax) at each draft position with the draft
+        # model's top-k predictions.
         draft_topk = getattr(self.drafter, 'draft_topk', None)
-        if draft_topk is not None:
+        if draft_topk is not None and logits is not None:
             self._accumulate_topk_acceptance(
-                spec_decode_metadata, sampler_output, draft_topk)
+                spec_decode_metadata, logits, draft_topk)
 
         return sampler_output
 
     def _accumulate_topk_acceptance(
         self,
         metadata: "SpecDecodeMetadata",
-        sampler_output: SamplerOutput,
+        logits: torch.Tensor,
         draft_topk: torch.Tensor,
     ) -> None:
-        """Compare target output tokens with draft model top-k predictions
-        and accumulate stats to a file for the test script to read."""
+        """Compare target model's argmax at each draft position with the
+        draft model's top-k predictions.
+
+        Uses target logits directly (not rejection sampler output) so that
+        every draft position has a definitive target token, giving accurate
+        top-k rates at all positions.
+        """
         try:
-            # sampler_output.sampled_token_ids: [batch_size, max_spec_len+1]
-            # Each row has accepted + recovered + bonus tokens, padded with -1.
-            output_ids = sampler_output.sampled_token_ids
             # draft_topk: [batch_size, num_spec_tokens, topk]
             batch_size = draft_topk.shape[0]
             num_spec = draft_topk.shape[1]
             topk = draft_topk.shape[2]
+
+            # Get target model's argmax token at each draft position.
+            # logits: [num_tokens + batch_size, vocab_size]  (flat, all positions)
+            # target_logits_indices selects the draft-position logits.
+            target_logits = logits[metadata.target_logits_indices]
+            # target_logits: [total_num_draft_tokens, vocab_size]
+            target_tokens = target_logits.argmax(dim=-1)
+            # target_tokens: [total_num_draft_tokens]
 
             topk_hits = torch.zeros(topk, num_spec, dtype=torch.int32,
                                     device=draft_topk.device)
             topk_total = torch.zeros(num_spec, dtype=torch.int32,
                                      device=draft_topk.device)
 
+            # cu_num_draft_tokens maps flat indices to per-request positions.
+            cu = metadata.cu_num_draft_tokens
             for req_idx in range(batch_size):
+                start = cu[req_idx].item()
                 n_draft = metadata.num_draft_tokens[req_idx]
                 if n_draft == 0:
                     continue
-                # Count ALL draft positions (use num_drafts as denominator,
-                # matching the standard per-position acceptance metric).
-                # Positions with placeholder (-1) are counted as mismatches.
                 for step in range(min(n_draft, num_spec)):
                     topk_total[step] += 1
-                    target_token = output_ids[req_idx, step]
-                    if target_token < 0:
-                        # Placeholder: position after rejection → mismatch
-                        continue
+                    target_token = target_tokens[start + step]
                     draft_at_step = draft_topk[req_idx, step, :]
                     match = (draft_at_step == target_token)
                     cum_match = match.cummax(dim=0).values

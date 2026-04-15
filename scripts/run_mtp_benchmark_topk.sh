@@ -241,6 +241,10 @@ if [ -n "$REPETITION_PENALTY" ]; then
 fi
 
 # ======================== Run ========================
+# Clean stale top-k stats file from previous runs.
+TOPK_STATS_FILE="${VLLM_TOPK_STATS_PATH:-/tmp/vllm_topk_stats.json}"
+rm -f "$TOPK_STATS_FILE"
+
 echo "============================================"
 echo "MTP Top-k Acceptance Rate Benchmark"
 echo "============================================"
