@@ -1513,23 +1513,6 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
-        # Observe top-k acceptance stats from model runner output.
-        _has_hits = model_runner_output.spec_decode_topk_hits is not None
-        _has_total = model_runner_output.spec_decode_topk_total is not None
-        if spec_decoding_stats is not None and _has_hits and _has_total:
-            spec_decoding_stats.observe_topk(
-                model_runner_output.spec_decode_topk_hits,
-                model_runner_output.spec_decode_topk_total,
-            )
-        elif spec_decoding_stats is not None:
-            logger.info(
-                "TOPK_DEBUG scheduler: spec_stats exists but "
-                "topk_hits=%s topk_total=%s (has_hits=%s has_total=%s)",
-                type(model_runner_output.spec_decode_topk_hits),
-                type(model_runner_output.spec_decode_topk_total),
-                _has_hits, _has_total,
-            )
-
         if (
             stats := self.make_stats(
                 spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats

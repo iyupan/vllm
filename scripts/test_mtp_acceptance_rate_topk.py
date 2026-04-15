@@ -148,18 +148,13 @@ def split_thinking(text):
 # ---------------------------------------------------------------------------
 
 def collect_spec_decode_metrics(llm, num_spec_tokens):
-    """Collect cumulative speculative decoding metrics including top-k."""
+    """Collect cumulative speculative decoding metrics from vLLM."""
     metrics = llm.get_metrics()
 
     num_drafts = 0
     num_draft_tokens = 0
     num_accepted_tokens = 0
     acceptance_counts = [0] * num_spec_tokens
-
-    # topk_accepted[k_label] = {pos: count}
-    # k_label is the "topk" label value, e.g. "1", "2", "3"
-    topk_accepted: dict[str, list[int]] = {}
-    topk_total: dict[str, list[int]] = {}
 
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
@@ -176,25 +171,8 @@ def collect_spec_decode_metrics(llm, num_spec_tokens):
             for pos in range(len(metric.values)):
                 if pos < num_spec_tokens:
                     acceptance_counts[pos] += metric.values[pos]
-        elif metric.name == "vllm:spec_decode_num_topk_accepted_per_pos":
-            assert isinstance(metric, Vector)
-            # Vector labels include "topk" key
-            k_label = metric.labels.get("topk", "")
-            if k_label:
-                if k_label not in topk_accepted:
-                    topk_accepted[k_label] = [0] * num_spec_tokens
-                for pos in range(min(len(metric.values), num_spec_tokens)):
-                    topk_accepted[k_label][pos] += metric.values[pos]
-        elif metric.name == "vllm:spec_decode_num_topk_total_per_pos":
-            assert isinstance(metric, Vector)
-            key = "total"
-            if key not in topk_total:
-                topk_total[key] = [0] * num_spec_tokens
-            for pos in range(min(len(metric.values), num_spec_tokens)):
-                topk_total[key][pos] += metric.values[pos]
 
-    return (num_drafts, num_draft_tokens, num_accepted_tokens,
-            acceptance_counts, topk_accepted, topk_total)
+    return num_drafts, num_draft_tokens, num_accepted_tokens, acceptance_counts
 
 
 def print_phase_report(phase_name, num_drafts, num_draft_tokens,
@@ -229,30 +207,37 @@ def print_phase_report(phase_name, num_drafts, num_draft_tokens,
             print(f"    Position {i}: {r:.4f} ({count}/{num_drafts})")
 
 
-def print_topk_report(num_spec_tokens, topk_accepted, topk_total):
-    """Print per-head top-k acceptance rate report."""
-    total_counts = topk_total.get("total", [0] * num_spec_tokens)
+def load_topk_from_file():
+    """Load top-k stats accumulated by the worker process."""
+    from vllm.v1.worker.gpu.spec_decode.topk_stats import load_topk_stats
+    return load_topk_stats()
 
+
+def print_topk_report(num_spec_tokens, topk_data):
+    """Print per-head top-k acceptance rate report from file-based stats."""
     print(f"\n--- Per-head Top-k Acceptance Rate ---")
+    if topk_data is None:
+        print("  (no top-k data collected)")
+        return
+
+    topk_hits = topk_data["topk_hits"]   # [topk][num_spec_steps]
+    topk_total = topk_data["topk_total"]  # [num_spec_steps]
+
     for pos in range(num_spec_tokens):
-        total = total_counts[pos] if pos < len(total_counts) else 0
+        total = topk_total[pos] if pos < len(topk_total) else 0
         print(f"  Position {pos} (MTP Head {pos}):")
-        for k in range(1, 4):
-            k_label = str(k)
-            if k_label in topk_accepted:
-                hits = topk_accepted[k_label][pos] if pos < len(topk_accepted[k_label]) else 0
-            else:
-                hits = 0
+        for k in range(len(topk_hits)):
+            hits = topk_hits[k][pos] if pos < len(topk_hits[k]) else 0
             if total > 0:
                 rate = hits / total * 100
-                print(f"    Top-{k}: {rate:.2f}% ({hits}/{total})")
+                print(f"    Top-{k+1}: {rate:.2f}% ({hits}/{total})")
             else:
-                print(f"    Top-{k}: N/A (no data)")
+                print(f"    Top-{k+1}: N/A (no data)")
 
 
 def print_report(args, num_prompts, total_output_tokens, total_elapsed,
-                 total_metrics, topk_accepted, topk_total,
-                 thinking_metrics=None, response_metrics=None):
+                 total_metrics, thinking_metrics=None,
+                 response_metrics=None):
     dataset_label = args.dataset
     if args.subset:
         dataset_label += f" / {args.subset}"
@@ -282,8 +267,9 @@ def print_report(args, num_prompts, total_output_tokens, total_elapsed,
         nd, ndt, nat, ac, ntok, el = response_metrics
         print_phase_report("Response Phase", nd, ndt, nat, ac, ntok, el)
 
-    # Top-k analysis
-    print_topk_report(args.num_spec_tokens, topk_accepted, topk_total)
+    # Top-k analysis (loaded from file written by worker process)
+    topk_data = load_topk_from_file()
+    print_topk_report(args.num_spec_tokens, topk_data)
 
     print("=" * 60)
 
@@ -340,6 +326,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Clean stale top-k stats file from a previous run.
+    from vllm.v1.worker.gpu.spec_decode.topk_stats import (
+        _get_stats_path, reset_topk_stats)
+    _stats_file = _get_stats_path()
+    if os.path.exists(_stats_file):
+        os.remove(_stats_file)
+    reset_topk_stats()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir,
                                               trust_remote_code=True)
@@ -527,14 +521,8 @@ def main():
         response_metrics = (*resp_deltas, resp_pos_deltas,
                             response_output_tokens, response_elapsed)
 
-        # Collect final top-k metrics (cumulative)
-        final = collect_spec_decode_metrics(llm, args.num_spec_tokens)
-        topk_accepted = final[4]
-        topk_total = final[5]
-
         print_report(args, len(prompts), total_output_tokens, total_elapsed,
-                     total_metrics, topk_accepted, topk_total,
-                     thinking_metrics, response_metrics)
+                     total_metrics, thinking_metrics, response_metrics)
 
     else:
         # Single-phase generation
@@ -572,12 +560,12 @@ def main():
                 json.dump(records, f, ensure_ascii=False, indent=2)
             print(f"Saved {len(records)} outputs to {args.save_output}")
 
-        nd, ndt, nat, ac, topk_accepted, topk_total = \
-            collect_spec_decode_metrics(llm, args.num_spec_tokens)
+        nd, ndt, nat, ac = collect_spec_decode_metrics(
+            llm, args.num_spec_tokens)
 
         total_metrics = (nd, ndt, nat, ac, total_output_tokens, elapsed)
         print_report(args, len(prompts), total_output_tokens, elapsed,
-                     total_metrics, topk_accepted, topk_total)
+                     total_metrics)
 
 
 if __name__ == "__main__":

@@ -829,18 +829,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculator is not None
                 else None,
             )
-            # Extract top-k stats (small tensors, synchronous is fine).
+            # Accumulate top-k acceptance stats (written to a shared
+            # file so the test script can read them after generation).
             if (self.rejection_sampler.topk_hits is not None
                     and self.rejection_sampler.topk_total is not None):
-                self._topk_hits = (
-                    self.rejection_sampler.topk_hits.tolist()
+                from vllm.v1.worker.gpu.spec_decode.topk_stats import (
+                    accumulate_topk_stats)
+                accumulate_topk_stats(
+                    self.rejection_sampler.topk_hits,
+                    self.rejection_sampler.topk_total,
                 )
-                self._topk_total = (
-                    self.rejection_sampler.topk_total.tolist()
-                )
-            else:
-                self._topk_hits = None
-                self._topk_total = None
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
@@ -1125,14 +1123,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Prepare the model runner output.
-        # DEBUG: hardcode test values to verify cross-process transport
-        _num_spec = self.num_speculative_steps if hasattr(self, 'num_speculative_steps') and self.num_speculative_steps else 0
-        if _num_spec > 0 and input_batch.num_draft_tokens > 0:
-            _debug_hits = [[99] * _num_spec for _ in range(3)]
-            _debug_total = [100] * _num_spec
-        else:
-            _debug_hits = getattr(self, '_topk_hits', None)
-            _debug_total = getattr(self, '_topk_total', None)
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             # NOTE(woosuk): req_id_to_index is unused in this model runner.
@@ -1141,8 +1131,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             kv_connector_output=kv_connector_output,
-            spec_decode_topk_hits=_debug_hits,
-            spec_decode_topk_total=_debug_total,
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
