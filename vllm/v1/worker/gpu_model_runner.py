@@ -3116,10 +3116,6 @@ class GPUModelRunner(
         # prediction (argmax) at each draft position with the draft
         # model's top-k predictions.
         draft_topk = getattr(self.drafter, 'draft_topk', None)
-        print(f"[TOPK_DEBUG] draft_topk={draft_topk is not None}, "
-              f"logits={logits is not None}, "
-              f"drafter_type={type(self.drafter).__name__}",
-              flush=True)
         if draft_topk is not None and logits is not None:
             self._accumulate_topk_acceptance(
                 spec_decode_metadata, logits, draft_topk)
@@ -3158,10 +3154,12 @@ class GPUModelRunner(
             topk_total = torch.zeros(num_spec, dtype=torch.int32,
                                      device=draft_topk.device)
 
-            # cu_num_draft_tokens maps flat indices to per-request positions.
+            # cu_num_draft_tokens is cumsum WITHOUT leading zero:
+            # e.g. [3, 6, 9] for 3 reqs with 3 drafts each.
+            # start = 0 for req 0, cu[req-1] for req > 0.
             cu = metadata.cu_num_draft_tokens
             for req_idx in range(batch_size):
-                start = cu[req_idx].item()
+                start = 0 if req_idx == 0 else cu[req_idx - 1].item()
                 n_draft = metadata.num_draft_tokens[req_idx]
                 if n_draft == 0:
                     continue
@@ -3178,12 +3176,9 @@ class GPUModelRunner(
             from vllm.v1.worker.gpu.spec_decode.topk_stats import (
                 accumulate_topk_stats)
             accumulate_topk_stats(topk_hits, topk_total)
-        except Exception as e:
+        except Exception:
             # Never crash the main inference loop for stats collection.
-            import traceback
-            traceback.print_exc()
-            print(f"[TOPK_DEBUG] _accumulate_topk_acceptance error: {e}",
-                  flush=True)
+            pass
 
     def _bookkeeping_sync(
         self,

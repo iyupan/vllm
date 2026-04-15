@@ -494,8 +494,6 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            print(f"[TOPK_DEBUG] Early exit: num_spec={self.num_speculative_tokens}, "
-                  f"parallel_drafting={self.parallel_drafting}", flush=True)
             draft_token_ids = self._greedy_sample(sample_hidden_states)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
