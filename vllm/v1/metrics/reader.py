@@ -108,6 +108,14 @@ def get_metrics_snapshot() -> list[Metric]:
                     collected.append(
                         Vector(name=metric.name, labels=labels, values=values)
                     )
+            elif metric.name in (
+                "vllm:spec_decode_num_topk_accepted_per_pos",
+                "vllm:spec_decode_num_topk_total_per_pos",
+            ):
+                for labels, values in _digest_num_accepted_by_pos_samples(samples):
+                    collected.append(
+                        Vector(name=metric.name, labels=labels, values=values)
+                    )
             else:
                 for s in samples:
                     collected.append(

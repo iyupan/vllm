@@ -27,12 +27,22 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
+    # Top-k acceptance tracking (for analysis only).
+    # num_topk_accepted_per_pos[k][pos]: how many times target token at pos
+    # was in draft model's top-(k+1) predictions.
+    num_topk_accepted_per_pos: list[list[int]] = field(default_factory=list)
+    # Total evaluated positions (for normalization).
+    num_topk_total_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
-    def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
+    def new(cls, num_spec_tokens: int, topk: int = 3) -> "SpecDecodingStats":
         return cls(
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
+            num_topk_accepted_per_pos=[
+                [0] * num_spec_tokens for _ in range(topk)
+            ],
+            num_topk_total_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
@@ -42,6 +52,28 @@ class SpecDecodingStats:
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
+
+    def observe_topk(
+        self,
+        topk_hits: list[list[int]],
+        topk_total: list[int],
+    ):
+        """Observe top-k acceptance hits from a batch.
+
+        Args:
+            topk_hits: [topk][num_spec_tokens] hit counts per k per position.
+            topk_total: [num_spec_tokens] total evaluated per position.
+        """
+        for k in range(len(topk_hits)):
+            if k < len(self.num_topk_accepted_per_pos):
+                for pos in range(
+                    min(len(topk_hits[k]), len(self.num_topk_accepted_per_pos[k]))
+                ):
+                    self.num_topk_accepted_per_pos[k][pos] += topk_hits[k][pos]
+        for pos in range(
+            min(len(topk_total), len(self.num_topk_total_per_pos))
+        ):
+            self.num_topk_total_per_pos[pos] += topk_total[pos]
 
 
 class SpecDecodingLogging:
@@ -60,6 +92,8 @@ class SpecDecodingLogging:
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
+        self.topk_accepted_lists: list[list[list[int]]] = []
+        self.topk_total_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
@@ -68,6 +102,12 @@ class SpecDecodingLogging:
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
+        )
+        self.topk_accepted_lists.append(
+            spec_decoding_stats.num_topk_accepted_per_pos
+        )
+        self.topk_total_lists.append(
+            spec_decoding_stats.num_topk_total_per_pos
         )
 
     def log(self, log_fn=logger.info):
@@ -97,6 +137,27 @@ class SpecDecodingLogging:
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
+        # Top-k acceptance rates
+        topk_str = ""
+        if self.topk_accepted_lists and self.topk_total_lists:
+            topk_total = np.sum(
+                np.array(self.topk_total_lists), axis=0
+            )
+            for k_idx, k_label in enumerate(["top1", "top2", "top3"]):
+                if k_idx < len(self.topk_accepted_lists[0]):
+                    k_hits = np.sum(
+                        [lst[k_idx] for lst in self.topk_accepted_lists
+                         if k_idx < len(lst)],
+                        axis=0,
+                    )
+                    k_rates = np.where(
+                        topk_total > 0,
+                        k_hits / topk_total,
+                        0.0,
+                    )
+                    k_rates_str = ", ".join(f"{r:.3f}" for r in k_rates)
+                    topk_str += f", {k_label}: [{k_rates_str}]"
+
         log_fn(
             "SpecDecoding metrics: "
             "Mean acceptance length: %.2f, "
@@ -105,7 +166,7 @@ class SpecDecodingLogging:
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
             "Per-position acceptance rate: %s, "
-            "Avg Draft acceptance rate: %.1f%%",
+            "Avg Draft acceptance rate: %.1f%%%s",
             mean_acceptance_length,
             accepted_throughput,
             draft_throughput,
@@ -113,6 +174,7 @@ class SpecDecodingLogging:
             num_draft_tokens,
             rates_str,
             draft_acceptance_rate,
+            topk_str,
         )
         self.reset()
 
@@ -196,6 +258,38 @@ class SpecDecodingProm:
             for idx, lv in per_engine_labelvalues.items()
         }
 
+        # Top-k acceptance counters: labeled by (position, topk).
+        topk_labelnames = labelnames + ["position", "topk"]
+        topk_counter = self._counter_cls(
+            name="vllm:spec_decode_num_topk_accepted_per_pos",
+            documentation="Top-k accepted tokens per draft position.",
+            labelnames=topk_labelnames,
+        )
+        self.counter_topk_accepted: dict[
+            int, list[list[prometheus_client.Counter]]
+        ] = {
+            idx: [
+                [topk_counter.labels(*lv, str(pos), str(k + 1))
+                 for pos in range(num_spec_tokens)]
+                for k in range(3)
+            ]
+            for idx, lv in per_engine_labelvalues.items()
+        }
+
+        topk_total_labelnames = labelnames + ["position"]
+        topk_total_counter = self._counter_cls(
+            name="vllm:spec_decode_num_topk_total_per_pos",
+            documentation="Total evaluated drafts per position for top-k.",
+            labelnames=topk_total_labelnames,
+        )
+        self.counter_topk_total: dict[
+            int, list[prometheus_client.Counter]
+        ] = {
+            idx: [topk_total_counter.labels(*lv, str(pos))
+                  for pos in range(num_spec_tokens)]
+            for idx, lv in per_engine_labelvalues.items()
+        }
+
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
         if not self.spec_decoding_enabled:
             return
@@ -212,6 +306,19 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+        # Top-k counters
+        for k in range(len(spec_decoding_stats.num_topk_accepted_per_pos)):
+            if k < len(self.counter_topk_accepted.get(engine_idx, [])):
+                for pos, count in enumerate(
+                    spec_decoding_stats.num_topk_accepted_per_pos[k]
+                ):
+                    self.counter_topk_accepted[engine_idx][k][pos].inc(count)
+        for pos, count in enumerate(
+            spec_decoding_stats.num_topk_total_per_pos
+        ):
+            if pos < len(self.counter_topk_total.get(engine_idx, [])):
+                self.counter_topk_total[engine_idx][pos].inc(count)
 
 
 def make_per_engine(

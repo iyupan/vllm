@@ -74,6 +74,16 @@ class EagleSpeculator:
             dtype=torch.int64,
             device=device,
         )
+        # Top-k draft predictions for acceptance rate analysis.
+        # Shape: [max_num_reqs, num_speculative_steps, topk]
+        self.topk = 3
+        self.draft_topk = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            self.topk,
+            dtype=torch.int64,
+            device=device,
+        )
 
         # currently we don't  support PIECEWISE for Eagle.
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -172,6 +182,9 @@ class EagleSpeculator:
                 else None,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
+            # Store top-k predictions for acceptance rate analysis.
+            _, topk_indices = torch.topk(logits[:num_reqs], k=self.topk, dim=-1)
+            self.draft_topk[:num_reqs, step, :] = topk_indices
 
             if step < self.num_speculative_steps - 1:
                 # Update the inputs for the next step.
@@ -294,6 +307,9 @@ class EagleSpeculator:
             if draft_logits_out is not None
             else None,
         )
+        # Store top-k predictions for acceptance rate analysis.
+        _, topk_indices = torch.topk(logits[:num_reqs], k=self.topk, dim=-1)
+        self.draft_topk[:num_reqs, 0, :] = topk_indices
 
         if self.num_speculative_steps == 1:
             # Early exit.

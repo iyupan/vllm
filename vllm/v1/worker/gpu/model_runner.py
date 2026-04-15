@@ -824,7 +824,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_logits[input_batch.idx_mapping]
                 if self.req_states.draft_logits is not None
                 else None,
+                # Draft top-k for acceptance rate analysis.
+                draft_topk=self.speculator.draft_topk
+                if self.speculator is not None
+                else None,
             )
+            # Extract top-k stats (small tensors, synchronous is fine).
+            if (self.rejection_sampler.topk_hits is not None
+                    and self.rejection_sampler.topk_total is not None):
+                self._topk_hits = (
+                    self.rejection_sampler.topk_hits.tolist()
+                )
+                self._topk_total = (
+                    self.rejection_sampler.topk_total.tolist()
+                )
+            else:
+                self._topk_hits = None
+                self._topk_total = None
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
@@ -1117,6 +1133,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             kv_connector_output=kv_connector_output,
+            spec_decode_topk_hits=getattr(self, '_topk_hits', None),
+            spec_decode_topk_total=getattr(self, '_topk_total', None),
         )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,

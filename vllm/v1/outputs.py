@@ -253,6 +253,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Top-k acceptance stats: topk_hits[k][pos] = hit count, topk_total[pos] = total
+    spec_decode_topk_hits: list[list[int]] | None = None
+    spec_decode_topk_total: list[int] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
