@@ -838,9 +838,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._topk_total = (
                     self.rejection_sampler.topk_total.tolist()
                 )
+                # DEBUG: verify topk data is computed
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                if any(v > 0 for v in self._topk_total):
+                    _log.info("TOPK_DEBUG model_runner: hits=%s total=%s",
+                              self._topk_hits, self._topk_total)
+                else:
+                    _log.info("TOPK_DEBUG model_runner: total is ALL ZERO "
+                              "num_draft_tokens=%d num_reqs=%d",
+                              input_batch.num_draft_tokens,
+                              len(input_batch.req_ids))
             else:
                 self._topk_hits = None
                 self._topk_total = None
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                _log.info("TOPK_DEBUG model_runner: topk_hits/total is None")
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
