@@ -810,12 +810,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
+        # DEBUG: touch files to trace which branch is taken
+        import pathlib as _pl
+        _pl.Path("/tmp/_topk_debug_sample_called").touch()
+
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
+            _pl.Path("/tmp/_topk_debug_no_draft").touch()
             assert self.sampler is not None
             sampler_output = self.sampler(logits, input_batch)
         else:
             # Rejection sampling for spec decoding.
+            _pl.Path("/tmp/_topk_debug_has_draft").touch()
             assert self.rejection_sampler is not None
             sampler_output = self.rejection_sampler(
                 logits,
@@ -831,14 +837,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             # Accumulate top-k acceptance stats (written to a shared
             # file so the test script can read them after generation).
-            if (self.rejection_sampler.topk_hits is not None
-                    and self.rejection_sampler.topk_total is not None):
+            _has_topk = (self.rejection_sampler.topk_hits is not None
+                         and self.rejection_sampler.topk_total is not None)
+            _pl.Path(f"/tmp/_topk_debug_rs_has_topk_{_has_topk}").touch()
+            if _has_topk:
                 from vllm.v1.worker.gpu.spec_decode.topk_stats import (
                     accumulate_topk_stats)
                 accumulate_topk_stats(
                     self.rejection_sampler.topk_hits,
                     self.rejection_sampler.topk_total,
                 )
+                _pl.Path("/tmp/_topk_debug_accumulated").touch()
 
         # Get the number of sampled and rejected tokens.
         # For chunked prefills, num_sampled and num_rejected are both 0.
