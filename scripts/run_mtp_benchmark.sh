@@ -125,7 +125,9 @@ esac
 [ -n "$OVERRIDE_REPETITION_PENALTY" ] && REPETITION_PENALTY="$OVERRIDE_REPETITION_PENALTY"
 
 # ======================== Dataset Config ========================
-# Each dataset defines: HF_DATASET, SUBSET, SPLIT, TEXT_COLUMN, SAVE_DIR
+# Each dataset defines: HF_DATASET, SUBSET, SPLIT, TEXT_COLUMN, FORMAT, SAVE_DIR
+# FORMAT="mcq" uses shuffled (A)/(B)/(C)/(D) choices; FORMAT="raw" uses text-column as-is.
+FORMAT="raw"
 case "$DATASET" in
     aime25)
         HF_DATASET="MathArena/aime_2025"
@@ -138,7 +140,8 @@ case "$DATASET" in
         HF_DATASET="Idavidrein/gpqa"
         SUBSET="gpqa_diamond"
         SPLIT="train"
-        TEXT_COLUMN="Question"
+        TEXT_COLUMN=""
+        FORMAT="mcq"
         SAVE_DIR="gpqa_diamond"
         ;;
     gsm8k)
@@ -200,7 +203,6 @@ CMD=(
     --model-dir "$MODEL_DIR"
     --dataset "$HF_DATASET"
     --split "$SPLIT"
-    --text-column "$TEXT_COLUMN"
     --mode "$MODE"
     --reasoning-parser "$REASONING_PARSER"
     --max-tokens "$MAX_TOKENS"
@@ -211,6 +213,13 @@ CMD=(
     --temp "$TEMP"
     --save-output "$OUTPUT_FILE"
 )
+
+# MCQ format (e.g. gpqa) vs raw text-column
+if [ "$FORMAT" = "mcq" ]; then
+    CMD+=(--format mcq)
+elif [ -n "$TEXT_COLUMN" ]; then
+    CMD+=(--text-column "$TEXT_COLUMN")
+fi
 
 # Add subset if defined
 if [ -n "$SUBSET" ]; then
@@ -242,6 +251,7 @@ fi
 # ======================== Run ========================
 echo "============================================"
 echo "Dataset       : $DATASET ($HF_DATASET)"
+echo "Format        : $FORMAT"
 echo "Model         : $MODEL_DIR"
 echo "Temperature   : $TEMP"
 echo "Spec tokens   : $NUM_SPEC_TOKENS"

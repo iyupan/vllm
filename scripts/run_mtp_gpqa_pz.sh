@@ -56,7 +56,7 @@
 python scripts/test_mtp_acceptance_rate_pz.py \
         --model-dir /public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B \
         --dataset Idavidrein/gpqa --subset gpqa_diamond --split train \
-        --text-column Question \
+        --format mcq \
         --mode chat \
         --enable-thinking \
         --reasoning-parser qwen3 \

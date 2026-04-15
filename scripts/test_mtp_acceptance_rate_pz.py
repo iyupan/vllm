@@ -83,12 +83,15 @@ Examples:
 import argparse
 import json
 import os
+import random
 import time
 
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
+
+_MCQ_LABELS = ["A", "B", "C", "D"]
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +135,57 @@ def load_hf_dataset(dataset_name: str, subset: str | None, split: str,
             val = "\n".join(str(v) for v in val)
         texts.append(str(val))
     return texts
+
+
+def load_gpqa_as_mcq(dataset_name: str, subset: str | None, split: str,
+                     seed: int = 42) -> tuple[list[str], list[str]]:
+    """Load GPQA dataset and format as multiple-choice questions.
+
+    Shuffles the four answer options per question (with a deterministic seed)
+    and returns the formatted text together with the correct-answer letter.
+
+    Returns:
+        (texts, correct_letters) where texts[i] is the formatted MCQ string
+        and correct_letters[i] is one of "A", "B", "C", "D".
+    """
+    from datasets import load_dataset
+    kwargs = {}
+    if subset:
+        kwargs["name"] = subset
+    ds = load_dataset(dataset_name, split=split, **kwargs)
+    print(f"Dataset columns: {ds.column_names}")
+    print(f"Total samples: {len(ds)}")
+
+    texts = []
+    correct_letters = []
+    for i, row in enumerate(ds):
+        question = row["Question"].strip()
+        correct = row["Correct Answer"].strip()
+        incorrect = [
+            row["Incorrect Answer 1"].strip(),
+            row["Incorrect Answer 2"].strip(),
+            row["Incorrect Answer 3"].strip(),
+        ]
+
+        # Build options list with a correct-answer marker, then shuffle
+        options = [(correct, True)] + [(inc, False) for inc in incorrect]
+        rng = random.Random(seed + i)
+        rng.shuffle(options)
+
+        # Find which label the correct answer landed on
+        correct_label = None
+        lines = []
+        for j, (text, is_correct) in enumerate(options):
+            label = _MCQ_LABELS[j]
+            lines.append(f"({label}) {text}")
+            if is_correct:
+                correct_label = label
+
+        formatted = f"{question}\n\n" + "\n".join(lines)
+        texts.append(formatted)
+        correct_letters.append(correct_label)
+
+    return texts, correct_letters
 
 
 def apply_chat_template(tokenizer, texts: list[str],
@@ -305,6 +359,13 @@ def parse_args():
                     help="Path to local file (when --dataset=local)")
     ds.add_argument("--num-prompts", type=int, default=None,
                     help="Limit number of prompts (default: all)")
+    ds.add_argument("--format", type=str, default="raw",
+                    choices=["raw", "mcq"],
+                    help="Prompt format: 'raw' sends the text column as-is, "
+                         "'mcq' formats GPQA as multiple-choice with "
+                         "shuffled (A)/(B)/(C)/(D) options (default: raw)")
+    ds.add_argument("--mcq-seed", type=int, default=42,
+                    help="Random seed for MCQ option shuffling (default: 42)")
 
     # Model args
     md = parser.add_argument_group("model")
@@ -357,7 +418,15 @@ def main():
                                               trust_remote_code=True)
 
     # ---- Load dataset ----
-    if args.dataset == "local":
+    correct_letters: list[str] | None = None
+
+    if args.format == "mcq":
+        print(f"Loading dataset {args.dataset} as MCQ "
+              f"(subset={args.subset}, split={args.split}, "
+              f"seed={args.mcq_seed}) ...")
+        texts, correct_letters = load_gpqa_as_mcq(
+            args.dataset, args.subset, args.split, seed=args.mcq_seed)
+    elif args.dataset == "local":
         if not args.dataset_path:
             raise ValueError("--dataset-path is required when --dataset=local")
         print(f"Loading local dataset from {args.dataset_path} ...")
@@ -370,6 +439,8 @@ def main():
 
     if args.num_prompts is not None:
         texts = texts[:args.num_prompts]
+        if correct_letters is not None:
+            correct_letters = correct_letters[:args.num_prompts]
 
     # ---- Validate thinking args ----
     if args.enable_thinking and args.mode != "chat":
@@ -524,7 +595,7 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
             records = []
             for i in range(len(prompts)):
-                records.append({
+                rec = {
                     "prompt": texts[i],
                     "thinking": all_thinking_texts[i],
                     "response": all_response_texts[i],
@@ -532,7 +603,10 @@ def main():
                         thinking_outputs[i].outputs[0].token_ids),
                     "response_tokens": len(
                         response_outputs[i].outputs[0].token_ids),
-                })
+                }
+                if correct_letters is not None:
+                    rec["correct_answer"] = correct_letters[i]
+                records.append(rec)
             with open(args.save_output, "w") as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
             print(f"Saved {len(records)} outputs to {args.save_output}")
@@ -581,11 +655,14 @@ def main():
                 os.makedirs(output_dir, exist_ok=True)
             records = []
             for i, output in enumerate(outputs):
-                records.append({
+                rec = {
                     "prompt": texts[i],
                     "output": output.outputs[0].text,
                     "num_tokens": len(output.outputs[0].token_ids),
-                })
+                }
+                if correct_letters is not None:
+                    rec["correct_answer"] = correct_letters[i]
+                records.append(rec)
             with open(args.save_output, "w") as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
             print(f"Saved {len(records)} outputs to {args.save_output}")
