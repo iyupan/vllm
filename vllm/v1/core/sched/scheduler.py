@@ -1515,11 +1515,11 @@ class Scheduler(SchedulerInterface):
 
         # Observe top-k acceptance stats from model runner output.
         if (spec_decoding_stats is not None
-                and model_output.spec_decode_topk_hits is not None
-                and model_output.spec_decode_topk_total is not None):
+                and model_runner_output.spec_decode_topk_hits is not None
+                and model_runner_output.spec_decode_topk_total is not None):
             spec_decoding_stats.observe_topk(
-                model_output.spec_decode_topk_hits,
-                model_output.spec_decode_topk_total,
+                model_runner_output.spec_decode_topk_hits,
+                model_runner_output.spec_decode_topk_total,
             )
 
         if (
