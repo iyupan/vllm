@@ -382,6 +382,18 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def _greedy_sample_with_topk(
+        self, hidden_states: torch.Tensor, topk: int = 3,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Greedy-sample and return top-k indices for acceptance analysis."""
+        if self.use_local_argmax_reduction:
+            draft = self.model.get_top_tokens(hidden_states)
+            return draft, draft.unsqueeze(-1).expand(-1, topk)
+        logits = self.model.compute_logits(hidden_states)
+        draft = logits.argmax(dim=-1)
+        _, topk_indices = torch.topk(logits, k=topk, dim=-1)
+        return draft, topk_indices
+
     def propose(
         self,
         # [num_tokens]
@@ -505,7 +517,8 @@ class SpecDecodeBaseProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        draft_token_ids = self._greedy_sample(sample_hidden_states)
+        draft_token_ids, topk_step0 = self._greedy_sample_with_topk(
+            sample_hidden_states)
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -519,6 +532,7 @@ class SpecDecodeBaseProposer:
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
+        topk_list = [topk_step0]
 
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
@@ -641,11 +655,16 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            draft_token_ids, topk_step = self._greedy_sample_with_topk(
+                last_hidden_states[:batch_size])
             draft_token_ids_list.append(draft_token_ids)
+            topk_list.append(topk_step)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        # Store top-k for acceptance analysis:
+        # [batch_size, num_speculative_tokens, topk]
+        self.draft_topk = torch.stack(topk_list, dim=1)
         return draft_token_ids
 
     def set_inputs_first_pass(

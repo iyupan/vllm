@@ -3111,7 +3111,62 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
+
+        # Top-k acceptance analysis: compare target model output tokens
+        # with the draft model's top-k predictions at each position.
+        draft_topk = getattr(self.drafter, 'draft_topk', None)
+        if draft_topk is not None:
+            self._accumulate_topk_acceptance(
+                spec_decode_metadata, sampler_output, draft_topk)
+
         return sampler_output
+
+    def _accumulate_topk_acceptance(
+        self,
+        metadata: "SpecDecodeMetadata",
+        sampler_output: SamplerOutput,
+        draft_topk: torch.Tensor,
+    ) -> None:
+        """Compare target output tokens with draft model top-k predictions
+        and accumulate stats to a file for the test script to read."""
+        try:
+            # sampler_output.sampled_token_ids: [batch_size, max_spec_len+1]
+            # Each row has accepted + recovered + bonus tokens, padded with -1.
+            output_ids = sampler_output.sampled_token_ids
+            # draft_topk: [batch_size, num_spec_tokens, topk]
+            batch_size = draft_topk.shape[0]
+            num_spec = draft_topk.shape[1]
+            topk = draft_topk.shape[2]
+
+            topk_hits = torch.zeros(topk, num_spec, dtype=torch.int32,
+                                    device=draft_topk.device)
+            topk_total = torch.zeros(num_spec, dtype=torch.int32,
+                                     device=draft_topk.device)
+
+            for req_idx in range(batch_size):
+                n_draft = metadata.num_draft_tokens[req_idx]
+                if n_draft == 0:
+                    continue
+                # The output row has: [token_0, token_1, ..., -1, -1]
+                # where token_i is target model's choice at position i.
+                for step in range(min(n_draft, num_spec)):
+                    target_token = output_ids[req_idx, step]
+                    if target_token < 0:
+                        break
+                    topk_total[step] += 1
+                    draft_at_step = draft_topk[req_idx, step, :]
+                    match = (draft_at_step == target_token)
+                    cum_match = match.cummax(dim=0).values
+                    for k in range(topk):
+                        if cum_match[k]:
+                            topk_hits[k, step] += 1
+
+            from vllm.v1.worker.gpu.spec_decode.topk_stats import (
+                accumulate_topk_stats)
+            accumulate_topk_stats(topk_hits, topk_total)
+        except Exception:
+            # Never crash the main inference loop for stats collection.
+            pass
 
     def _bookkeeping_sync(
         self,
