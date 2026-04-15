@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model-dir PATH          Model directory"
             echo "  --output-base PATH        Base output directory"
             echo "  --temp FLOAT              Temperature (default: 0.6)"
-            echo "  --num-spec-tokens INT     Speculative tokens (default: 2)"
+            echo "  ∫ INT     Speculative tokens (default: 2)"
             echo "  --tp INT                  Tensor parallelism (default: 8)"
             echo "  --max-tokens INT          Max output tokens (default: 32768)"
             echo "  --max-model-len INT       Max model length (default: 262144)"
