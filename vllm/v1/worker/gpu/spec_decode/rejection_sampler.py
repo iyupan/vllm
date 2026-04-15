@@ -333,7 +333,7 @@ def compute_topk_acceptance(
     num_speculative_steps: int,
     topk: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute per-position per-k acceptance hits.
+    """Compute per-position per-k acceptance hits (PyTorch implementation).
 
     Returns:
         topk_hits: [topk, num_speculative_steps] aggregated hit counts
@@ -348,20 +348,44 @@ def compute_topk_acceptance(
         num_speculative_steps,
         dtype=torch.int32, device=target_sampled.device,
     )
-    if num_reqs > 0:
-        _topk_acceptance_kernel[(num_reqs,)](
-            target_sampled,
-            draft_topk,
-            draft_topk.stride(0),
-            draft_topk.stride(1),
-            topk_hits,
-            topk_hits.stride(0),
-            topk_total,
-            cu_num_logits,
-            TOPK=topk,
-            NUM_SPEC_STEPS=num_speculative_steps,
-            num_warps=1,
-        )
+    if num_reqs == 0:
+        return topk_hits, topk_total
+
+    # Build per-request target tokens: [num_reqs, num_speculative_steps]
+    # and a valid mask for positions that actually have draft tokens.
+    starts = cu_num_logits[:-1]  # [num_reqs]
+    ends = cu_num_logits[1:]     # [num_reqs]
+    num_tokens_per_req = ends - starts  # [num_reqs]
+
+    for step in range(num_speculative_steps):
+        # Which requests have a valid draft token at this step?
+        valid = num_tokens_per_req > (step + 1)  # need at least step+2 tokens
+        if not valid.any():
+            continue
+        valid_indices = valid.nonzero(as_tuple=True)[0]
+        n_valid = valid_indices.shape[0]
+        topk_total[step] = n_valid
+
+        # Gather target tokens at this step for valid requests.
+        gather_idx = starts[valid_indices] + step  # [n_valid]
+        target_tokens = target_sampled[gather_idx]  # [n_valid]
+
+        # Gather draft top-k at this step for valid requests.
+        # draft_topk: [max_num_reqs, num_speculative_steps, topk]
+        draft_at_step = draft_topk[valid_indices, step, :]  # [n_valid, topk]
+
+        # Compare: target_tokens vs each rank in draft top-k.
+        # match_mask[i, k] = True if target_tokens[i] == draft_at_step[i, k]
+        match_mask = (draft_at_step == target_tokens.unsqueeze(1))  # [n_valid, topk]
+
+        # For top-k acceptance: target in top-k means ANY of the first k
+        # ranks matched.  cumulative OR across ranks.
+        cum_match = match_mask.cummax(dim=1).values  # [n_valid, topk]
+        # cum_match[i, k] = True if target matched any rank 0..k
+
+        for k in range(topk):
+            topk_hits[k, step] = cum_match[:, k].sum().to(torch.int32)
+
     return topk_hits, topk_total
 
 
