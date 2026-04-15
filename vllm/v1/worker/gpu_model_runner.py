@@ -3131,23 +3131,21 @@ class GPUModelRunner(
         """Compare target model's argmax at each draft position with the
         draft model's top-k predictions.
 
-        Uses target logits directly (not rejection sampler output) so that
-        every draft position has a definitive target token, giving accurate
-        top-k rates at all positions.
+        Uses cumulative/sequential comparison matching the standard rejection
+        sampler: position i counts as "accepted" only if ALL positions 0..i
+        matched. This makes top-1 rates consistent with the standard
+        per-position acceptance rates.
         """
         try:
-            # draft_topk: [batch_size, num_spec_tokens, topk]
-            batch_size = draft_topk.shape[0]
             num_spec = draft_topk.shape[1]
             topk = draft_topk.shape[2]
+            # Use metadata batch_size (number of requests with drafts),
+            # clamped to draft_topk size to avoid OOB.
+            batch_size = min(draft_topk.shape[0],
+                             len(metadata.num_draft_tokens))
 
-            # Get target model's argmax token at each draft position.
-            # logits: [num_tokens + batch_size, vocab_size]  (flat, all positions)
-            # target_logits_indices selects the draft-position logits.
             target_logits = logits[metadata.target_logits_indices]
-            # target_logits: [total_num_draft_tokens, vocab_size]
             target_tokens = target_logits.argmax(dim=-1)
-            # target_tokens: [total_num_draft_tokens]
 
             topk_hits = torch.zeros(topk, num_spec, dtype=torch.int32,
                                     device=draft_topk.device)
@@ -3156,22 +3154,32 @@ class GPUModelRunner(
 
             # cu_num_draft_tokens is cumsum WITHOUT leading zero:
             # e.g. [3, 6, 9] for 3 reqs with 3 drafts each.
-            # start = 0 for req 0, cu[req-1] for req > 0.
             cu = metadata.cu_num_draft_tokens
             for req_idx in range(batch_size):
-                start = 0 if req_idx == 0 else cu[req_idx - 1].item()
+                start = (0 if req_idx == 0
+                         else cu[req_idx - 1].item())
                 n_draft = metadata.num_draft_tokens[req_idx]
                 if n_draft == 0:
                     continue
+
+                # Cumulative acceptance per k-level: once top-k fails
+                # at a position, all subsequent positions also fail
+                # (matching sequential rejection behavior).
+                accepted = [True] * topk
+
                 for step in range(min(n_draft, num_spec)):
                     topk_total[step] += 1
                     target_token = target_tokens[start + step]
                     draft_at_step = draft_topk[req_idx, step, :]
-                    match = (draft_at_step == target_token)
-                    cum_match = match.cummax(dim=0).values
+
                     for k in range(topk):
-                        if cum_match[k]:
+                        if not accepted[k]:
+                            continue
+                        # Check if target is in draft's top-(k+1).
+                        if (draft_at_step[:k + 1] == target_token).any():
                             topk_hits[k, step] += 1
+                        else:
+                            accepted[k] = False
 
             from vllm.v1.worker.gpu.spec_decode.topk_stats import (
                 accumulate_topk_stats)
