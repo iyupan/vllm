@@ -48,37 +48,90 @@ def strip_think_blocks(text: str) -> str:
 def extract_answer_letter(response: str) -> str | None:
     """Extract the MCQ answer letter (A/B/C/D) the model selected.
 
-    Tries several patterns in decreasing reliability order.
+    Tries several patterns in decreasing reliability order.  Uses the
+    *last* match for patterns that are likely repeated in reasoning text,
+    so that the final conclusion takes precedence.
+
     Returns the uppercase letter or None if extraction fails.
     """
     # Work on the tail of the response (conclusion area)
-    tail = response[-2000:] if len(response) > 2000 else response
+    tail = response[-3000:] if len(response) > 3000 else response
 
-    # Pattern 1: explicit "answer is (X)" or "answer is X"
-    m = re.search(
+    # Pattern 0: "ANSWER: X" — explicit format from evaluation prompt.
+    # Highest priority; matches the exact format we instruct models to use.
+    matches = re.findall(
+        r"ANSWER\s*:\s*\(?([A-D])\)?",
+        tail,
+    )
+    if matches:
+        return matches[-1].upper()
+
+    # Pattern 1: "**Answer:** (X)" / "Answer: (X)" / "**Answer**: (X)"
+    # Handles bold markers and colon in any order around "Answer".
+    matches = re.findall(
+        r"Answer[*:\s：]{1,8}\(?([A-D])\)?",
+        tail, re.IGNORECASE,
+    )
+    if matches:
+        return matches[-1].upper()
+
+    # Pattern 2: <final_answer>(X)</final_answer>
+    matches = re.findall(
+        r"<final_answer>\s*\(?([A-D])\)?",
+        tail, re.IGNORECASE,
+    )
+    if matches:
+        return matches[-1].upper()
+
+    # Pattern 3: "answer is (X)" / "option is (X)" / "choice is (X)"
+    matches = re.findall(
         r"(?:answer|choice|option)\s+is\s*[:\s]*\(?([A-D])\)?",
         tail, re.IGNORECASE,
     )
-    if m:
-        return m.group(1).upper()
+    if matches:
+        return matches[-1].upper()
 
-    # Pattern 2: "The correct answer is (X)" / "I choose (X)"
-    m = re.search(
+    # Pattern 4: "matches option (X)" / "corresponds to option (X)"
+    matches = re.findall(
+        r"(?:matches|corresponds\s+to|is)\s+option\s+\(?([A-D])\)?",
+        tail, re.IGNORECASE,
+    )
+    if matches:
+        return matches[-1].upper()
+
+    # Pattern 5: "Correct Option: **(X)**" / "Correct Answer: (X)"
+    matches = re.findall(
+        r"correct\s+(?:option|answer|choice)[*:\s：]{1,8}\(?([A-D])\)?",
+        tail, re.IGNORECASE,
+    )
+    if matches:
+        return matches[-1].upper()
+
+    # Pattern 6: "The correct answer is (X)" / "I choose (X)"
+    matches = re.findall(
         r"(?:correct|best|right|choose|select|pick)\s+.*?\(?([A-D])\)?",
         tail, re.IGNORECASE,
     )
-    if m:
-        return m.group(1).upper()
+    if matches:
+        return matches[-1].upper()
 
-    # Pattern 3: standalone "(X)" or boxed "\boxed{X}" near the end
-    m = re.search(r"\(?([A-D])\)?\s*\.?\s*$", tail.rstrip())
-    if m:
-        return m.group(1).upper()
-    m = re.search(r"\\boxed\{([A-D])\}", tail)
-    if m:
-        return m.group(1).upper()
+    # Pattern 7: \boxed{X}
+    matches = re.findall(r"\\boxed\{([A-D])\}", tail)
+    if matches:
+        return matches[-1].upper()
 
-    # Pattern 4: only one letter A-D is mentioned in the last 500 chars
+    # Pattern 8: last non-empty line starts with "(X)" — model listed
+    # only the chosen option at the end.
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"\(?([A-D])\)", line)
+        if m:
+            return m.group(1).upper()
+        break  # only check the last non-empty line
+
+    # Pattern 9: only one letter A-D mentioned in the last 500 chars
     last_chunk = tail[-500:]
     found = set(re.findall(r"\b([A-D])\b", last_chunk))
     if len(found) == 1:

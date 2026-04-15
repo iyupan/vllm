@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-DEFAULT_OUTPUT="/extra_panyu/output_text_pz/Qwen3.5-35B-A3B/gpqa_diamond/output-think-32768-spec3-temp0.6.json"
+DEFAULT_OUTPUT="/extra_panyu/output_text_pz/Qwen3.5-35B-A3B/gpqa_diamond/output-think-32768-spec3-temp0.0.json"
 
 OUTPUT_FILE="${1:-$DEFAULT_OUTPUT}"
 

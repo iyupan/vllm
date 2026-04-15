@@ -181,7 +181,13 @@ def load_gpqa_as_mcq(dataset_name: str, subset: str | None, split: str,
             if is_correct:
                 correct_label = label
 
-        formatted = f"{question}\n\n" + "\n".join(lines)
+        formatted = (
+            "Answer the following multiple choice question. The last line "
+            "of your response should be of the following format: "
+            "'ANSWER: $LETTER' (without quotes) where LETTER is one of "
+            "ABCD. Think step by step before answering.\n\n"
+            f"{question}\n\n" + "\n".join(lines)
+        )
         texts.append(formatted)
         correct_letters.append(correct_label)
 
