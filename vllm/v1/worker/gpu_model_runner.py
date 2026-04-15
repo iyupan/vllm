@@ -3147,13 +3147,15 @@ class GPUModelRunner(
                 n_draft = metadata.num_draft_tokens[req_idx]
                 if n_draft == 0:
                     continue
-                # The output row has: [token_0, token_1, ..., -1, -1]
-                # where token_i is target model's choice at position i.
+                # Count ALL draft positions (use num_drafts as denominator,
+                # matching the standard per-position acceptance metric).
+                # Positions with placeholder (-1) are counted as mismatches.
                 for step in range(min(n_draft, num_spec)):
+                    topk_total[step] += 1
                     target_token = output_ids[req_idx, step]
                     if target_token < 0:
-                        break
-                    topk_total[step] += 1
+                        # Placeholder: position after rejection → mismatch
+                        continue
                     draft_at_step = draft_topk[req_idx, step, :]
                     match = (draft_at_step == target_token)
                     cum_match = match.cummax(dim=0).values
