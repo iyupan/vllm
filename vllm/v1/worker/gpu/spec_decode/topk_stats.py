@@ -33,16 +33,32 @@ def _get_stats_path() -> str:
     return _stats_path
 
 
+def _is_rank_zero() -> bool:
+    """Check if this is TP rank 0 (safe to call even without distributed)."""
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            return dist.get_rank() == 0
+    except Exception:
+        pass
+    return True
+
+
 def accumulate_topk_stats(
     topk_hits: torch.Tensor,
     topk_total: torch.Tensor,
 ) -> None:
     """Accumulate a batch of top-k hits/total into the global counters.
 
+    Only TP rank 0 writes to disk to avoid concurrent file writes.
+
     Args:
         topk_hits: [topk, num_spec_steps] int tensor.
         topk_total: [num_spec_steps] int tensor.
     """
+    if not _is_rank_zero():
+        return
+
     global _topk_hits_acc, _topk_total_acc
 
     hits = topk_hits.tolist()

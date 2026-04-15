@@ -3116,6 +3116,10 @@ class GPUModelRunner(
         # prediction (argmax) at each draft position with the draft
         # model's top-k predictions.
         draft_topk = getattr(self.drafter, 'draft_topk', None)
+        print(f"[TOPK_DEBUG] draft_topk={draft_topk is not None}, "
+              f"logits={logits is not None}, "
+              f"drafter_type={type(self.drafter).__name__}",
+              flush=True)
         if draft_topk is not None and logits is not None:
             self._accumulate_topk_acceptance(
                 spec_decode_metadata, logits, draft_topk)
@@ -3174,9 +3178,12 @@ class GPUModelRunner(
             from vllm.v1.worker.gpu.spec_decode.topk_stats import (
                 accumulate_topk_stats)
             accumulate_topk_stats(topk_hits, topk_total)
-        except Exception:
+        except Exception as e:
             # Never crash the main inference loop for stats collection.
-            pass
+            import traceback
+            traceback.print_exc()
+            print(f"[TOPK_DEBUG] _accumulate_topk_acceptance error: {e}",
+                  flush=True)
 
     def _bookkeeping_sync(
         self,

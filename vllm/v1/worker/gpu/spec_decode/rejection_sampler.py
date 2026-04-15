@@ -282,113 +282,6 @@ def probabilistic_rejection_sample(
     return sampled, rejected_steps + 1
 
 
-@triton.jit
-def _topk_acceptance_kernel(
-    # [num_draft_tokens + num_reqs]
-    target_sampled_ptr,
-    # [num_reqs, num_speculative_steps, topk]
-    draft_topk_ptr,
-    topk_stride_req,
-    topk_stride_step,
-    # [3, num_speculative_steps] - output (aggregated hits)
-    topk_hits_ptr,
-    topk_hits_stride,
-    # [num_speculative_steps] - output (total evaluated per pos)
-    topk_total_ptr,
-    # [num_reqs + 1]
-    cu_num_logits_ptr,
-    TOPK: tl.constexpr,
-    NUM_SPEC_STEPS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    num_tokens = end_idx - start_idx
-
-    for step in range(NUM_SPEC_STEPS):
-        if step < num_tokens - 1:
-            target_token = tl.load(target_sampled_ptr + start_idx + step)
-            tl.atomic_add(topk_total_ptr + step, 1)
-
-            matched_rank = TOPK
-            for k in range(TOPK):
-                draft_token = tl.load(
-                    draft_topk_ptr + req_idx * topk_stride_req
-                    + step * topk_stride_step + k
-                )
-                if target_token == draft_token and matched_rank == TOPK:
-                    matched_rank = k
-
-            for k in range(TOPK):
-                if k >= matched_rank:
-                    tl.atomic_add(
-                        topk_hits_ptr + k * topk_hits_stride + step, 1
-                    )
-
-
-def compute_topk_acceptance(
-    target_sampled: torch.Tensor,
-    draft_topk: torch.Tensor,
-    cu_num_logits: torch.Tensor,
-    num_speculative_steps: int,
-    topk: int = 3,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute per-position per-k acceptance hits (PyTorch implementation).
-
-    Returns:
-        topk_hits: [topk, num_speculative_steps] aggregated hit counts
-        topk_total: [num_speculative_steps] total evaluated per position
-    """
-    num_reqs = cu_num_logits.shape[0] - 1
-    topk_hits = torch.zeros(
-        topk, num_speculative_steps,
-        dtype=torch.int32, device=target_sampled.device,
-    )
-    topk_total = torch.zeros(
-        num_speculative_steps,
-        dtype=torch.int32, device=target_sampled.device,
-    )
-    if num_reqs == 0:
-        return topk_hits, topk_total
-
-    # Build per-request target tokens: [num_reqs, num_speculative_steps]
-    # and a valid mask for positions that actually have draft tokens.
-    starts = cu_num_logits[:-1]  # [num_reqs]
-    ends = cu_num_logits[1:]     # [num_reqs]
-    num_tokens_per_req = ends - starts  # [num_reqs]
-
-    for step in range(num_speculative_steps):
-        # Which requests have a valid draft token at this step?
-        valid = num_tokens_per_req > (step + 1)  # need at least step+2 tokens
-        if not valid.any():
-            continue
-        valid_indices = valid.nonzero(as_tuple=True)[0]
-        n_valid = valid_indices.shape[0]
-        topk_total[step] = n_valid
-
-        # Gather target tokens at this step for valid requests.
-        gather_idx = starts[valid_indices] + step  # [n_valid]
-        target_tokens = target_sampled[gather_idx]  # [n_valid]
-
-        # Gather draft top-k at this step for valid requests.
-        # draft_topk: [max_num_reqs, num_speculative_steps, topk]
-        draft_at_step = draft_topk[valid_indices, step, :]  # [n_valid, topk]
-
-        # Compare: target_tokens vs each rank in draft top-k.
-        # match_mask[i, k] = True if target_tokens[i] == draft_at_step[i, k]
-        match_mask = (draft_at_step == target_tokens.unsqueeze(1))  # [n_valid, topk]
-
-        # For top-k acceptance: target in top-k means ANY of the first k
-        # ranks matched.  cumulative OR across ranks.
-        cum_match = match_mask.cummax(dim=1).values  # [n_valid, topk]
-        # cum_match[i, k] = True if target matched any rank 0..k
-
-        for k in range(topk):
-            topk_hits[k, step] = cum_match[:, k].sum().to(torch.int32)
-
-    return topk_hits, topk_total
-
-
 class RejectionSampler:
     def __init__(
         self,
@@ -399,15 +292,12 @@ class RejectionSampler:
         self.sampler = sampler
         self.num_speculative_steps = num_speculative_steps
         self.use_strict_rejection_sampling = use_strict_rejection_sampling
-        self.topk_hits: torch.Tensor | None = None
-        self.topk_total: torch.Tensor | None = None
 
     def __call__(
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
-        draft_topk: torch.Tensor | None = None,
     ) -> SamplerOutput:
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
@@ -445,18 +335,6 @@ class RejectionSampler:
                 input_batch.idx_mapping,
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
-                self.num_speculative_steps,
-            )
-
-        # Compute top-k acceptance statistics (for analysis only,
-        # does not affect the actual spec decode flow).
-        # Only supported for strict rejection sampling where we have
-        # explicit target model tokens per position.
-        if draft_topk is not None and self.use_strict_rejection_sampling:
-            self.topk_hits, self.topk_total = compute_topk_acceptance(
-                sampler_output.sampled_token_ids.view(-1),
-                draft_topk,
-                input_batch.cu_num_logits,
                 self.num_speculative_steps,
             )
 
