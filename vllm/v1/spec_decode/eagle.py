@@ -101,6 +101,11 @@ class SpecDecodeBaseProposer:
         self.use_local_argmax_reduction: bool = (
             self.speculative_config.use_local_argmax_reduction
         )
+        # Top-k draft indices for optional acceptance analysis. Set by
+        # propose() and consumed+cleared by the model runner in the same
+        # step. None when top-k stats are unavailable (e.g. local argmax
+        # reduction, tree attention, single-step early return).
+        self.draft_topk: torch.Tensor | None = None
 
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -384,11 +389,19 @@ class SpecDecodeBaseProposer:
 
     def _greedy_sample_with_topk(
         self, hidden_states: torch.Tensor, topk: int = 3,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Greedy-sample and return top-k indices for acceptance analysis."""
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Greedy-sample and return top-k indices for acceptance analysis.
+
+        The second element is ``None`` when the local argmax reduction path
+        is active — it only computes top-1, so there are no real top-2/top-3
+        candidates, and fabricating them (previously broadcast from top-1)
+        would silently inflate the reported top-k rates.  Callers must treat
+        ``None`` as "top-k stats unavailable for this step" rather than a
+        degenerate top-k.
+        """
         if self.use_local_argmax_reduction:
             draft = self.model.get_top_tokens(hidden_states)
-            return draft, draft.unsqueeze(-1).expand(-1, topk)
+            return draft, None
         logits = self.model.compute_logits(hidden_states)
         draft = logits.argmax(dim=-1)
         _, topk_indices = torch.topk(logits, k=topk, dim=-1)
@@ -662,9 +675,14 @@ class SpecDecodeBaseProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        # Store top-k for acceptance analysis:
-        # [batch_size, num_speculative_tokens, topk]
-        self.draft_topk = torch.stack(topk_list, dim=1)
+        # Store top-k for acceptance analysis only when every speculative
+        # step produced real top-k candidates. Skip entirely on the
+        # local-argmax-reduction path, which cannot supply top-2/top-3.
+        if any(t is None for t in topk_list):
+            self.draft_topk = None
+        else:
+            # [batch_size, num_speculative_tokens, topk]
+            self.draft_topk = torch.stack(topk_list, dim=1)
         return draft_token_ids
 
     def set_inputs_first_pass(

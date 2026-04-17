@@ -220,6 +220,9 @@ def print_topk_report(num_spec_tokens, topk_data):
         print("  (no top-k data collected)")
         return
 
+    run_id = topk_data.get("run_id")
+    if run_id:
+        print(f"  run_id: {run_id}")
     topk_hits = topk_data["topk_hits"]   # [topk][num_spec_steps]
     topk_total = topk_data["topk_total"]  # [num_spec_steps]
 
@@ -327,12 +330,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Clean stale top-k stats file from a previous run.
-    from vllm.v1.worker.gpu.spec_decode.topk_stats import (
-        _get_stats_path, reset_topk_stats)
-    _stats_file = _get_stats_path()
-    if os.path.exists(_stats_file):
-        os.remove(_stats_file)
+    # Clean stale top-k stats file from a previous run. reset_topk_stats
+    # removes the on-disk file by default, so a no-data run cannot inherit
+    # numbers from a prior invocation.
+    from vllm.v1.worker.gpu.spec_decode.topk_stats import reset_topk_stats
     reset_topk_stats()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir,

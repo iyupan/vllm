@@ -12,6 +12,7 @@ import atexit
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import torch
@@ -20,6 +21,13 @@ import torch
 _topk_hits_acc: list[list[int]] | None = None
 _topk_total_acc: list[int] | None = None
 _stats_path: str | None = None
+# Identifier for the current accumulator run, embedded in the JSON so
+# readers can detect stale files left by a previous run.
+_run_id: str | None = None
+
+
+def _make_run_id() -> str:
+    return f"{os.getpid()}-{int(time.time() * 1000)}"
 
 
 def _get_stats_path() -> str:
@@ -59,7 +67,7 @@ def accumulate_topk_stats(
     if not _is_rank_zero():
         return
 
-    global _topk_hits_acc, _topk_total_acc
+    global _topk_hits_acc, _topk_total_acc, _run_id
 
     hits = topk_hits.tolist()
     total = topk_total.tolist()
@@ -67,6 +75,8 @@ def accumulate_topk_stats(
     if _topk_hits_acc is None:
         _topk_hits_acc = [[0] * len(hits[0]) for _ in range(len(hits))]
         _topk_total_acc = [0] * len(total)
+        if _run_id is None:
+            _run_id = _make_run_id()
 
     for k in range(len(hits)):
         for pos in range(len(hits[k])):
@@ -84,25 +94,54 @@ def flush_topk_stats() -> None:
     if _topk_hits_acc is None:
         return
     path = _get_stats_path()
-    data = {"topk_hits": _topk_hits_acc, "topk_total": _topk_total_acc}
+    data = {
+        "topk_hits": _topk_hits_acc,
+        "topk_total": _topk_total_acc,
+        "run_id": _run_id,
+    }
     with open(path, "w") as f:
         json.dump(data, f)
 
 
-def reset_topk_stats() -> None:
-    """Reset the global accumulators."""
-    global _topk_hits_acc, _topk_total_acc
+def reset_topk_stats(remove_file: bool = True) -> None:
+    """Reset the global accumulators.
+
+    Also removes the on-disk stats file by default so a subsequent reader
+    cannot see stats from a prior run merged with (or mistaken for) the
+    current one. Pass ``remove_file=False`` to keep the file — useful when
+    tests want to inspect state without a side effect.
+    """
+    global _topk_hits_acc, _topk_total_acc, _run_id
     _topk_hits_acc = None
     _topk_total_acc = None
+    _run_id = None
+    if remove_file:
+        try:
+            os.remove(_get_stats_path())
+        except FileNotFoundError:
+            pass
 
 
-def load_topk_stats(path: str | None = None) -> dict | None:
-    """Load accumulated stats from disk (called by the test script)."""
+def load_topk_stats(
+    path: str | None = None,
+    expected_run_id: str | None = None,
+) -> dict | None:
+    """Load accumulated stats from disk (called by the test script).
+
+    If ``expected_run_id`` is provided and does not match the file's
+    ``run_id``, returns ``None`` — the file is stale (from a prior run).
+    The returned dict includes the ``run_id`` field so callers can report
+    it alongside their metrics.
+    """
     path = path or _get_stats_path()
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    if (expected_run_id is not None
+            and data.get("run_id") != expected_run_id):
+        return None
+    return data
 
 
 # Flush on process exit as a safety net.

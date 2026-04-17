@@ -3119,6 +3119,10 @@ class GPUModelRunner(
         if draft_topk is not None and logits is not None:
             self._accumulate_topk_acceptance(
                 spec_decode_metadata, logits, draft_topk)
+        # Always clear to avoid the proposer's previous-step tensor leaking
+        # into a later step with a different batch shape.
+        if hasattr(self.drafter, 'draft_topk'):
+            self.drafter.draft_topk = None
 
         return sampler_output
 
@@ -3135,7 +3139,13 @@ class GPUModelRunner(
         sampler: position i counts as "accepted" only if ALL positions 0..i
         matched. This makes top-1 rates consistent with the standard
         per-position acceptance rates.
+
+        On the first exception, log a warning and disable future calls so
+        the main inference loop is never impacted, but failures are not
+        silently lost.
         """
+        if getattr(self, '_topk_stats_disabled', False):
+            return
         try:
             num_spec = draft_topk.shape[1]
             topk = draft_topk.shape[2]
@@ -3184,9 +3194,15 @@ class GPUModelRunner(
             from vllm.v1.worker.gpu.spec_decode.topk_stats import (
                 accumulate_topk_stats)
             accumulate_topk_stats(topk_hits, topk_total)
-        except Exception:
-            # Never crash the main inference loop for stats collection.
-            pass
+        except Exception as e:
+            # Never crash the main inference loop for stats collection, but
+            # surface the failure once and disable future calls so the bug
+            # is visible and doesn't silently corrupt reported numbers.
+            self._topk_stats_disabled = True
+            logger.warning(
+                "Top-k acceptance stats disabled after error: %s. "
+                "Subsequent batches will skip top-k accumulation.", e,
+                exc_info=True)
 
     def _bookkeeping_sync(
         self,
