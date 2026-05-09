@@ -57,6 +57,9 @@ bash scripts/infer_mtp_benchmark_speed.sh \
     --parquet-path /custom/path/to/test.parquet
 bash scripts/infer_mtp_benchmark_speed.sh \
     --data-base /shared/speed_data --speed-config throughput_8k
+
+# 9. 把 chat-template 渲染后的 prompt 也写入 records（默认关闭，用于排查/复现）
+bash scripts/infer_mtp_benchmark_speed.sh --save-prompt
 ```
 
 ## 三档温度预设（`--temp`）
