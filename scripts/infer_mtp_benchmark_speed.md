@@ -4,21 +4,26 @@ SPEED-Bench 专用的 MTP（Multi-Token Prediction）接受率测试入口脚本
 
 底层调用 `scripts/test_mtp_acceptance_rate_speed.py`。
 
-## 数据获取
+## 前置条件：准备 parquet
 
-`nvidia/SPEED-Bench` 在 HuggingFace 上的 parquet 已经是可用的（NVIDIA 上传的版本）。不传 `--parquet-path` 时，shell 自动跑这一步：
+脚本不下载 / 不解析数据，**只负责加载已经准备好的 parquet 跑评估**。需要你自己提前把 SPEED-Bench parquet 放到本地，可选两条路：
 
-1. 设置 `HF_HOME=${HF_DATA_BASE}`，所有 HF 下载/缓存集中到该目录
-2. `datasets.load_dataset("nvidia/SPEED-Bench", "${SPEED_CONFIG}", split="test")` 拉对应配置的全部 shard
-3. 直接 `ds.to_parquet("${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}/test.parquet")` 写出单个文件
+```python
+# A. 上游 parquet 已经预解析过（NVIDIA 在 HuggingFace 上传的 nvidia/SPEED-Bench）
+from datasets import load_dataset
+ds = load_dataset("nvidia/SPEED-Bench", "qualitative", split="test")
+ds.to_parquet("/extra_panyu/data/speed/qualitative/test.parquet")
 
-`HF_DATA_BASE` 默认 `/extra_panyu/hf/data`，可用 `--hf-data-base` 覆盖。已存在 `test.parquet` 时跳过下载。
+# B. 上游若是占位符版，则用 scripts/speed.py 里的 SPEEDBench.prepare_data
+#    （会拉 13 个外部 HF 数据集来填充 turns 列）
+from scripts.speed import SPEEDBench
+SPEEDBench.prepare_data(
+    output_dir="/extra_panyu/data/speed/qualitative",
+    config_name="qualitative",
+)
+```
 
-如果目录里残留有早期 `huggingface_hub.snapshot_download` 留下的 `test-*-of-*.parquet`（partial / 不完整下载），shell 会自动清理这些 shard 后再走 `load_dataset` 完整下载。
-
-显式传 `--parquet-path` 会跳过自动下载，认为路径已经准备好。
-
-> 进阶：如果未来上游 parquet 又改回占位符模式，可以用 `scripts/speed.py` 里的 `SPEEDBench.prepare_data` 跑解析（需要先补上 `scripts/__init__.py` 和 `scripts/base.py`，因为 `speed.py` 用的是 `from .base import` 相对导入）。当前流程不依赖这些。
+后续推理直接读这个 parquet，不再联网。
 
 ## 基本语法
 
@@ -26,43 +31,40 @@ SPEED-Bench 专用的 MTP（Multi-Token Prediction）接受率测试入口脚本
 bash scripts/infer_mtp_benchmark_speed.sh [选项]
 ```
 
-所有选项都有默认值；`--parquet-path` 可选，不传则自动下载。也支持单个 `*.parquet` 文件或包含 parquet 文件的目录。
+`--parquet-path` 可选，可以是单个 `*.parquet` 文件，也可以是包含 parquet 文件的目录。不传时默认 `${DATA_BASE}/${SPEED_CONFIG}/test.parquet`，即默认读 `/extra_panyu/data/speed/qualitative/test.parquet`（用 `--speed-config` 切换子目录、`--data-base` 切换根目录）。
 
 ## 常见用法
 
 ```bash
 # 1. 默认配置：qualitative + temp=0.6 + thinking + 单轮（仅 turns[0]）
-#    第一次跑时会自动下载到
-#    /extra_panyu/hf/data/nvidia/SPEED-Bench/qualitative/test.parquet
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative
+#    隐式读 /extra_panyu/data/speed/qualitative/test.parquet
+bash scripts/infer_mtp_benchmark_speed.sh
 
 # 2. 多轮完整评估（保留 SPEED-Bench 多轮设计意图）
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --multi-turn
+bash scripts/infer_mtp_benchmark_speed.sh --multi-turn
 
 # 3. throughput 配置 + 关闭 thinking
 bash scripts/infer_mtp_benchmark_speed.sh --speed-config throughput_8k --no-thinking
 
 # 4. 限制样本数做 smoke test
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --num-prompts 20
+bash scripts/infer_mtp_benchmark_speed.sh --num-prompts 20
 
 # 5. 切换温度档
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --temp 0.0    # 贪婪
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --temp 1.0    # thinking 推荐
+bash scripts/infer_mtp_benchmark_speed.sh --temp 0.0    # 贪婪
+bash scripts/infer_mtp_benchmark_speed.sh --temp 1.0    # thinking 推荐
 
 # 6. 改 spec token 数 / 模型路径
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --num-spec-tokens 2
-bash scripts/infer_mtp_benchmark_speed.sh --speed-config qualitative --model-dir /path/to/other/model
+bash scripts/infer_mtp_benchmark_speed.sh --num-spec-tokens 2
+bash scripts/infer_mtp_benchmark_speed.sh --model-dir /path/to/other/model
 
 # 7. 显式覆盖采样参数（覆盖会写进输出目录名）
-bash scripts/infer_mtp_benchmark_speed.sh \
-    --speed-config qualitative --temp 0.6 --top-p 0.9 --top-k 50
+bash scripts/infer_mtp_benchmark_speed.sh --temp 0.6 --top-p 0.9 --top-k 50
 
-# 8. 自定义下载根目录 / 显式指定本地 parquet
+# 8. 自定义 parquet 路径或数据根目录
 bash scripts/infer_mtp_benchmark_speed.sh \
-    --speed-config qualitative --hf-data-base /shared/hf_cache
-bash scripts/infer_mtp_benchmark_speed.sh \
-    --speed-config qualitative \
     --parquet-path /custom/path/to/test.parquet
+bash scripts/infer_mtp_benchmark_speed.sh \
+    --data-base /shared/speed_data --speed-config throughput_8k
 ```
 
 ## 三档温度预设（`--temp`）
@@ -80,9 +82,9 @@ bash scripts/infer_mtp_benchmark_speed.sh \
 
 | 选项                                                                              | 默认值                                       | 说明                                                |
 | --------------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------- |
-| `--parquet-path`                                                                  | （自动下载）                                 | SPEED-Bench parquet 文件或目录；不传则按 `--speed-config` 自动下载 |
-| `--speed-config`                                                                  | `qualitative`                                | SPEED-Bench 配置；同时决定自动下载位置和输出目录命名 |
-| `--hf-data-base`                                                                  | `/extra_panyu/hf/data`                       | HF 缓存 / 下载根目录（HF_HOME；下载后 parquet：`{base}/nvidia/SPEED-Bench/{config}/test.parquet`）|
+| `--parquet-path`                                                                  | `${DATA_BASE}/${SPEED_CONFIG}/test.parquet`  | SPEED-Bench parquet 文件或目录；不传时从 `--data-base` 和 `--speed-config` 拼出 |
+| `--speed-config`                                                                  | `qualitative`                                | SPEED-Bench 配置；既决定默认 parquet 子目录，也决定输出目录命名 |
+| `--data-base`                                                                     | `/extra_panyu/data/speed`                    | 默认 parquet 根目录                                 |
 | `--model-dir`                                                                     | `/public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B` | 模型目录                                            |
 | `--output-base`                                                                   | `/extra_panyu/output_text_pz`                | 输出根目录                                          |
 | `--temp`                                                                          | `0.6`                                        | 温度（见上表）                                      |
@@ -208,12 +210,9 @@ SPEED-Bench 的 `qualitative` 配置里很多数据集是**多轮对话**（MTBe
 ## 注意事项
 
 - 脚本带 `set -euo pipefail`，未识别选项直接报错退出。
-- 不传 `--parquet-path` 时调 `datasets.load_dataset("nvidia/SPEED-Bench", config_name)` 拉指定配置的全部 shard，然后 `to_parquet` 写出单个 `${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}/test.parquet`。已存在则跳过。
-- 自动下载会先清理同目录下早期失败留下的 `test-*-of-*.parquet`（partial 下载残留），避免和新 `test.parquet` 一起被 rglob 读到。
-- 显式传入 `--parquet-path` 会跳过自动下载——文件不存在直接报错。
-- 下载需要 `datasets` 包（vLLM 默认依赖里有）。如果遇到上游 parquet 被改回占位符模式而无法直接用，参考"数据获取"小节最后一段切换到 `prepare_data` 流程。
-- 模型路径和 output-base 是硬编码的服务器绝对路径，换机器需用 `--model-dir` / `--output-base` 覆盖。
-- `--speed-config` 现在同时决定**自动下载子目录**和**输出目录命名**。显式传 `--parquet-path` 时只影响输出命名；如果让自动下载决定 parquet，标签和数据保持一致。
+- `--parquet-path` 不传时会拼成 `${DATA_BASE}/${SPEED_CONFIG}/test.parquet`；若该路径不存在会立即退出并提示。
+- 模型路径、output-base、data-base 都是硬编码的服务器绝对路径，换机器需用 `--model-dir` / `--output-base` / `--data-base` 覆盖。
+- `--speed-config` 在自动拼路径模式下既影响默认 parquet 子目录，又影响输出目录命名；显式传 `--parquet-path` 时退化为只是输出标签，加载行为完全由 `--parquet-path` 决定（理论上可以配置不一致，但不推荐）。
 - `category` 名字若含空格、`/` 等字符会被 `_` 替换；同名碰撞会自动加 `_2`、`_3` 后缀避免覆盖。
 - `_summary.json` 永远在最后写出 — 中途 Ctrl+C 会丢这个文件，但已写出的 per-category 文件保留。
 - 与 `infer_mtp_benchmark.sh` 的差异：那个脚本对应的底层 py（`test_mtp_acceptance_rate_pz.py`）不分 category；SPEED-Bench 因为天然带 `category` 列，per-category 拆分才有意义。
@@ -285,15 +284,14 @@ vLLM 的 MTP 接受率指标（`vllm:spec_decode_num_drafts` 等）是**全局�
 
 shell 同步：`OUTPUT_FILE`（含 `.json`）→ `OUTPUT_RUN_DIR`（目录）。
 
-### Phase 6：自动下载（从 snapshot_download → load_dataset）
+### Phase 6：尝试自动下载，最后回归"只 load 已有 parquet"
 
-第一版自动下载用了 `huggingface_hub.snapshot_download` + `allow_patterns=["${SPEED_CONFIG}/*.parquet"]`。实测某些行的 `turns[0]` 还是占位符 `"FULL BENCHMARK DATA SHOULD BE FETCHED FROM..."`，让 `load_speed_bench` 直接报错。原因：`allow_patterns` 太窄，没把 HF 上 SPEED-Bench 该 config 的全部 shard 拉全（HF 数据集真正的文件清单写在 README YAML 里，靠 dataset metadata 而不是简单 glob）。
+中间一度想把数据获取也内聚进 shell：先后试过 `huggingface_hub.snapshot_download` 走 `allow_patterns` 拉部分 shard、用 `datasets.load_dataset` 走 metadata 拉完整 shard、以及调 `SPEEDBench.prepare_data` 触发占位符解析。每一步都有 corner case（partial 下载、上游版本不一致、需要给 `speed.py` 补 `__init__.py + base.py` 桩才能 import 等）。
 
-修正：改用 `datasets.load_dataset("nvidia/SPEED-Bench", config_name, split="test")` —— 它读 dataset 的 metadata，下载完整的文件集，然后 `ds.to_parquet(...)` 写成单个 parquet。`HF_HOME` 临时设到 `${HF_DATA_BASE}` 让 HF 缓存集中。
+最终决定回归原样：脚本只负责加载用户已经准备好的 parquet 跑评估，数据获取由用户在 README "前置条件" 里按需选 A 路（`load_dataset` + `to_parquet`）或 B 路（`SPEEDBench.prepare_data`）手动产出。这样：
 
-shell 端在自动下载前先清理目录里残留的 `test-*-of-*.parquet`（partial 下载残留），避免和新写出的 `test.parquet` 一起被 `Path.rglob("*.parquet")` 读到。
-
-`load_speed_bench()` 早就支持目录输入（`Path.rglob("*.parquet")`），Python 端零改动。
+- shell 不需要管 HF 缓存目录、不需要清理残留 shard、不需要兼容上游 placeholder/resolved 两种状态
+- 评估流程的边界清晰：`--parquet-path` 是契约入口，由调用方负责数据正确性
 
 ### 最终结构
 
@@ -301,8 +299,8 @@ shell 端在自动下载前先清理目录里残留的 `test-*-of-*.parquet`（p
 scripts/
     infer_mtp_benchmark.sh             ← 原版（aime25 / gpqa / gsm8k / mmlu / mt-bench）
     test_mtp_acceptance_rate_pz.py     ← 原版底层 py（被新脚本复用辅助函数）
-    speed.py                            ← NVIDIA SPEED-Bench 数据加载类（占位符 + prepare_data，主流程不依赖）
-    infer_mtp_benchmark_speed.sh       ← 新版 shell（自动下载 + per-category）
+    speed.py                            ← NVIDIA SPEED-Bench 数据加载类（按需用 prepare_data 解析占位符）
+    infer_mtp_benchmark_speed.sh       ← 新版 shell（per-category 输出目录）
     test_mtp_acceptance_rate_speed.py  ← 新版底层 py（按 category 拆 batch）
     infer_mtp_benchmark_speed.md       ← 本文档
 ```
@@ -312,6 +310,6 @@ scripts/
 1. **单轮为默认，多轮 opt-in**：SPEED-Bench 虽然天然多轮，但单轮用法和原 bench 直接对比，多轮调试成本更高，所以保留两条路径。
 2. **复用而非复制**：通过 `sys.path` 注入从兄弟脚本导入辅助函数，避免代码漂移；副作用是两个文件之间存在隐式依赖，重命名 `test_mtp_acceptance_rate_pz.py` 时要同步改 import。
 3. **per-category 必须独立 batch**：vLLM 全局 counter 限制下没有更优方案，代价是每 category 启动开销（对几十条样本可以忽略）。
-4. **`--speed-config` 现在双重角色**：自动下载启用后，它既决定下载哪个 parquet，又决定输出目录命名。显式传 `--parquet-path` 时退化为只是标签——保留了在同一份 parquet 上跑不同输出布局的解耦能力。
+4. **`--speed-config` 只是标签**：实际加载行为完全由 `--parquet-path` 决定，给 shell 留了一个解耦设计，便于未来在同一份 parquet 上跑不同的输出目录布局。
 5. **thinking 不进多轮 history**：Qwen3 等模型的多轮规范不要求保留过往 thinking；如果以后接其他模型规范不同（要保留），改一处 `histories[i].append(...)` 即可。
-6. **自动下载用 `load_dataset` 而非 `snapshot_download`**：`snapshot_download` + 简单 `allow_patterns` 不可靠——HF 数据集真正的文件清单写在 README YAML 里，glob 容易漏文件，结果就是 partial parquet（部分行还是占位符）。`load_dataset` 走 dataset metadata，能保证拉全。代价是 datasets 库的启动有点慢，但只在第一次跑。
+6. **数据获取留给上游**：尝试过把下载/解析内聚进 shell，发现上游 parquet 在 placeholder / resolved 之间状态不稳定，每加一种自动模式都得加一堆 corner case。最后回归"只 load 现成 parquet"，把数据正确性交给调用方。

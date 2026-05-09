@@ -1,31 +1,22 @@
 #!/bin/bash
-# Run MTP acceptance rate evaluation on SPEED-Bench.
-#
-# When --parquet-path is omitted, the script auto-downloads the parquet via
-# datasets.load_dataset("nvidia/SPEED-Bench", config_name) and writes a single
-# resolved test.parquet at:
-#   ${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}/test.parquet
-# All HF cache lives under ${HF_DATA_BASE} (HF_HOME).
+# Run MTP acceptance rate evaluation on a SPEED-Bench parquet.
 #
 # Usage:
 #   bash scripts/infer_mtp_benchmark_speed.sh \
+#       --parquet-path /extra_panyu/data/speed/qualitative/test.parquet \
 #       --speed-config qualitative --temp 0.6
 #
 #   bash scripts/infer_mtp_benchmark_speed.sh \
+#       --parquet-path /extra_panyu/data/speed/throughput_8k \
 #       --speed-config throughput_8k --multi-turn
-#
-#   bash scripts/infer_mtp_benchmark_speed.sh \
-#       --parquet-path /custom/path/to/test.parquet \
-#       --speed-config qualitative
 
 set -euo pipefail
 
 # ======================== Defaults ========================
 MODEL_DIR="/public/panyu/hf/ckpt/Qwen/Qwen3.5-35B-A3B"
 OUTPUT_BASE="/extra_panyu/output_text_pz"
-HF_DATA_BASE="/extra_panyu/hf/data"
+DATA_BASE="/extra_panyu/data/speed"
 PARQUET_PATH=""
-USER_PROVIDED_PARQUET=false
 SPEED_CONFIG="qualitative"
 TEMP="0.6"
 NUM_SPEC_TOKENS=3
@@ -48,14 +39,11 @@ OVERRIDE_REPETITION_PENALTY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --parquet-path)
-            PARQUET_PATH="$2"
-            USER_PROVIDED_PARQUET=true
-            shift 2 ;;
+        --parquet-path)       PARQUET_PATH="$2";               shift 2 ;;
         --speed-config)       SPEED_CONFIG="$2";               shift 2 ;;
+        --data-base)          DATA_BASE="$2";                  shift 2 ;;
         --model-dir)          MODEL_DIR="$2";                  shift 2 ;;
         --output-base)        OUTPUT_BASE="$2";                shift 2 ;;
-        --hf-data-base)       HF_DATA_BASE="$2";               shift 2 ;;
         --temp)               TEMP="$2";                       shift 2 ;;
         --num-spec-tokens)    NUM_SPEC_TOKENS="$2";            shift 2 ;;
         --tp)                 TP="$2";                         shift 2 ;;
@@ -75,18 +63,15 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: $0 [OPTIONS]
 
-SPEED-Bench MTP acceptance-rate evaluation. If --parquet-path is omitted,
-the parquet is downloaded via datasets.load_dataset to
-\${HF_DATA_BASE}/nvidia/SPEED-Bench/\${SPEED_CONFIG}/test.parquet
-(HF_HOME is set to \${HF_DATA_BASE} for caching).
+SPEED-Bench MTP acceptance-rate evaluation on a pre-prepared parquet.
+If --parquet-path is omitted, defaults to
+\${DATA_BASE}/\${SPEED_CONFIG}/test.parquet.
 
 Common options:
-  --parquet-path PATH        Override auto-download; path to *.parquet file or
-                             directory containing parquet shards
-  --speed-config NAME        SPEED-Bench config: qualitative / throughput_1k /
-                             throughput_2k / throughput_8k / throughput_16k /
-                             throughput_32k (default: qualitative)
-  --hf-data-base PATH        HF download root (default: $HF_DATA_BASE)
+  --parquet-path PATH        Override default; *.parquet file or directory
+  --speed-config NAME        SPEED-Bench config; also picks default parquet
+                             subdirectory (default: qualitative)
+  --data-base PATH           Default parquet root (default: $DATA_BASE)
   --model-dir PATH           Model directory
   --output-base PATH         Output root (default: $OUTPUT_BASE)
   --temp FLOAT               Temperature (default: 0.6)
@@ -115,39 +100,13 @@ EOF
     esac
 done
 
-# ======================== Resolve / Auto-download Parquet ========================
-if ! $USER_PROVIDED_PARQUET; then
-    PARQUET_DIR="${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}"
-    PARQUET_PATH="${PARQUET_DIR}/test.parquet"
-
-    if [ ! -f "$PARQUET_PATH" ]; then
-        # Clean partial shards left by an earlier interrupted/narrow download
-        # so the eval script's rglob doesn't mix them with the new test.parquet.
-        if compgen -G "${PARQUET_DIR}/test-*-of-*.parquet" > /dev/null; then
-            echo "Removing partial shard files under $PARQUET_DIR"
-            rm -f "${PARQUET_DIR}"/test-*-of-*.parquet
-        fi
-
-        echo "Resolved parquet not found at $PARQUET_PATH"
-        echo "Downloading nvidia/SPEED-Bench config=${SPEED_CONFIG} via datasets.load_dataset ..."
-        mkdir -p "$PARQUET_DIR"
-        HF_HOME="$HF_DATA_BASE" python - <<EOF
-from datasets import load_dataset
-
-ds = load_dataset("nvidia/SPEED-Bench", "$SPEED_CONFIG", split="test")
-ds.to_parquet("$PARQUET_PATH")
-print(f"Wrote {len(ds)} rows to $PARQUET_PATH")
-EOF
-    fi
+if [ -z "$PARQUET_PATH" ]; then
+    PARQUET_PATH="${DATA_BASE}/${SPEED_CONFIG}/test.parquet"
 fi
 
 if [ ! -e "$PARQUET_PATH" ]; then
     echo "Error: parquet path does not exist: $PARQUET_PATH"
-    exit 1
-fi
-
-if [ -d "$PARQUET_PATH" ] && ! compgen -G "${PARQUET_PATH}/*.parquet" > /dev/null; then
-    echo "Error: no *.parquet files found under $PARQUET_PATH"
+    echo "Either prepare data at this location or pass --parquet-path explicitly."
     exit 1
 fi
 
@@ -241,7 +200,6 @@ fi
 # ======================== Run ========================
 echo "============================================"
 echo "Parquet       : $PARQUET_PATH"
-echo "HF data base  : $HF_DATA_BASE"
 echo "Speed config  : $SPEED_CONFIG"
 echo "Model         : $MODEL_DIR"
 echo "Temperature   : $TEMP"
