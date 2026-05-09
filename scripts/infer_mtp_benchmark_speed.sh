@@ -1,9 +1,11 @@
 #!/bin/bash
 # Run MTP acceptance rate evaluation on SPEED-Bench.
 #
-# When --parquet-path is omitted, the script auto-downloads the parquet for
-# --speed-config from huggingface.co/datasets/nvidia/SPEED-Bench into
-# ${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}/.
+# When --parquet-path is omitted, the script auto-downloads the parquet via
+# datasets.load_dataset("nvidia/SPEED-Bench", config_name) and writes a single
+# resolved test.parquet at:
+#   ${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}/test.parquet
+# All HF cache lives under ${HF_DATA_BASE} (HF_HOME).
 #
 # Usage:
 #   bash scripts/infer_mtp_benchmark_speed.sh \
@@ -74,9 +76,9 @@ while [[ $# -gt 0 ]]; do
 Usage: $0 [OPTIONS]
 
 SPEED-Bench MTP acceptance-rate evaluation. If --parquet-path is omitted,
-the parquet for the chosen --speed-config is auto-downloaded from
-huggingface.co/datasets/nvidia/SPEED-Bench into
-\${HF_DATA_BASE}/nvidia/SPEED-Bench/\${SPEED_CONFIG}/.
+the parquet is downloaded via datasets.load_dataset to
+\${HF_DATA_BASE}/nvidia/SPEED-Bench/\${SPEED_CONFIG}/test.parquet
+(HF_HOME is set to \${HF_DATA_BASE} for caching).
 
 Common options:
   --parquet-path PATH        Override auto-download; path to *.parquet file or
@@ -115,28 +117,26 @@ done
 
 # ======================== Resolve / Auto-download Parquet ========================
 if ! $USER_PROVIDED_PARQUET; then
-    PARQUET_PATH="${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}"
+    PARQUET_DIR="${HF_DATA_BASE}/nvidia/SPEED-Bench/${SPEED_CONFIG}"
+    PARQUET_PATH="${PARQUET_DIR}/test.parquet"
 
-    have_parquet=false
-    if [ -d "$PARQUET_PATH" ]; then
-        if compgen -G "${PARQUET_PATH}/*.parquet" > /dev/null; then
-            have_parquet=true
+    if [ ! -f "$PARQUET_PATH" ]; then
+        # Clean partial shards left by an earlier interrupted/narrow download
+        # so the eval script's rglob doesn't mix them with the new test.parquet.
+        if compgen -G "${PARQUET_DIR}/test-*-of-*.parquet" > /dev/null; then
+            echo "Removing partial shard files under $PARQUET_DIR"
+            rm -f "${PARQUET_DIR}"/test-*-of-*.parquet
         fi
-    fi
 
-    if ! $have_parquet; then
-        echo "Parquet not found at $PARQUET_PATH"
-        echo "Downloading nvidia/SPEED-Bench config=${SPEED_CONFIG} ..."
-        mkdir -p "${HF_DATA_BASE}/nvidia/SPEED-Bench"
-        python - <<EOF
-from huggingface_hub import snapshot_download
+        echo "Resolved parquet not found at $PARQUET_PATH"
+        echo "Downloading nvidia/SPEED-Bench config=${SPEED_CONFIG} via datasets.load_dataset ..."
+        mkdir -p "$PARQUET_DIR"
+        HF_HOME="$HF_DATA_BASE" python - <<EOF
+from datasets import load_dataset
 
-snapshot_download(
-    repo_id="nvidia/SPEED-Bench",
-    repo_type="dataset",
-    local_dir="${HF_DATA_BASE}/nvidia/SPEED-Bench",
-    allow_patterns=["${SPEED_CONFIG}/*.parquet"],
-)
+ds = load_dataset("nvidia/SPEED-Bench", "$SPEED_CONFIG", split="test")
+ds.to_parquet("$PARQUET_PATH")
+print(f"Wrote {len(ds)} rows to $PARQUET_PATH")
 EOF
     fi
 fi
