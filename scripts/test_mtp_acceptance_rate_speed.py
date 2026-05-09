@@ -156,7 +156,9 @@ def run_generation(llm, prompts, args, common_kwargs):
         t2 = time.perf_counter()
         m_after_think = collect_spec_decode_metrics(llm, spec_n)
         elapsed_think = t2 - t1
-        tok_think = sum(len(o.outputs[0].token_ids) for o in thinking_outputs)
+        per_think_tok = [
+            len(o.outputs[0].token_ids) for o in thinking_outputs]
+        tok_think = sum(per_think_tok)
         think_4 = (
             m_after_think[0] - m_before[0],
             m_after_think[1] - m_before[1],
@@ -179,7 +181,9 @@ def run_generation(llm, prompts, args, common_kwargs):
         t4 = time.perf_counter()
         m_after_resp = collect_spec_decode_metrics(llm, spec_n)
         elapsed_resp = t4 - t3
-        tok_resp = sum(len(o.outputs[0].token_ids) for o in response_outputs)
+        per_resp_tok = [
+            len(o.outputs[0].token_ids) for o in response_outputs]
+        tok_resp = sum(per_resp_tok)
         resp_4 = (
             m_after_resp[0] - m_after_think[0],
             m_after_resp[1] - m_after_think[1],
@@ -207,6 +211,10 @@ def run_generation(llm, prompts, args, common_kwargs):
             "outputs": response_outputs,
             "thinking_texts": thinking_texts,
             "response_texts": response_texts,
+            "per_thinking_tokens": per_think_tok,
+            "per_response_tokens": per_resp_tok,
+            "total_thinking_tokens": tok_think,
+            "total_response_tokens": tok_resp,
             "num_output_tokens": tok_think + tok_resp,
             "elapsed": elapsed_think + elapsed_resp,
             "metrics_total": total_4,
@@ -224,7 +232,8 @@ def run_generation(llm, prompts, args, common_kwargs):
     t2 = time.perf_counter()
     m_after = collect_spec_decode_metrics(llm, spec_n)
     elapsed = t2 - t1
-    tok = sum(len(o.outputs[0].token_ids) for o in outputs)
+    per_resp_tok = [len(o.outputs[0].token_ids) for o in outputs]
+    tok = sum(per_resp_tok)
     metrics_4 = (
         m_after[0] - m_before[0],
         m_after[1] - m_before[1],
@@ -235,6 +244,10 @@ def run_generation(llm, prompts, args, common_kwargs):
         "outputs": outputs,
         "thinking_texts": ["" for _ in prompts],
         "response_texts": [o.outputs[0].text for o in outputs],
+        "per_thinking_tokens": [0] * len(prompts),
+        "per_response_tokens": per_resp_tok,
+        "total_thinking_tokens": 0,
+        "total_response_tokens": tok,
         "num_output_tokens": tok,
         "elapsed": elapsed,
         "metrics_total": metrics_4,
@@ -270,11 +283,13 @@ def run_single_turn(llm, tokenizer, requests, args, common_kwargs):
             "source": r["source"],
             "turns": [r["turns"][0]],
             "responses": [res["response_texts"][i]],
-            "num_output_tokens": [
-                len(res["outputs"][i].outputs[0].token_ids)],
+            "num_output_tokens": [res["per_response_tokens"][i]],
         }
         if args.enable_thinking:
             rec["thinking"] = [res["thinking_texts"][i]]
+            rec["thinking_tokens"] = [res["per_thinking_tokens"][i]]
+        if args.save_prompt:
+            rec["prompt"] = [prompts[i]]
         records.append(rec)
 
     return records, res
@@ -289,6 +304,9 @@ def run_multi_turn(llm, tokenizer, requests, args, common_kwargs):
     per_resp: list[list[str]] = [[] for _ in requests]
     per_think: list[list[str]] = [[] for _ in requests]
     per_tok: list[list[int]] = [[] for _ in requests]
+    per_think_tok: list[list[int]] = [[] for _ in requests]
+    per_prompt: list[list[str]] | None = (
+        [[] for _ in requests] if args.save_prompt else None)
 
     max_turns = max(len(r["turns"]) for r in requests)
     print(f"Multi-turn mode: max turns = {max_turns}, "
@@ -325,10 +343,12 @@ def run_multi_turn(llm, tokenizer, requests, args, common_kwargs):
         for k, i in enumerate(active):
             response = res["response_texts"][k]
             thinking = res["thinking_texts"][k]
-            tok = len(res["outputs"][k].outputs[0].token_ids)
             per_resp[i].append(response)
             per_think[i].append(thinking)
-            per_tok[i].append(tok)
+            per_tok[i].append(res["per_response_tokens"][k])
+            per_think_tok[i].append(res["per_thinking_tokens"][k])
+            if per_prompt is not None:
+                per_prompt[i].append(prompts[k])
             histories[i].append({"role": "assistant", "content": response})
 
         nd, ndt, nat, ac = res["metrics_total"]
@@ -371,6 +391,9 @@ def run_multi_turn(llm, tokenizer, requests, args, common_kwargs):
         }
         if args.enable_thinking:
             rec["thinking"] = per_think[i]
+            rec["thinking_tokens"] = per_think_tok[i]
+        if per_prompt is not None:
+            rec["prompt"] = per_prompt[i]
         records.append(rec)
 
     aggregated = {
@@ -383,6 +406,9 @@ def run_multi_turn(llm, tokenizer, requests, args, common_kwargs):
         "metrics_response": (
             (rs_nd, rs_ndt, rs_nat, rs_ac, rs_tok, rs_el)
             if args.enable_thinking else None),
+        "total_thinking_tokens": th_tok,
+        "total_response_tokens": (
+            rs_tok if args.enable_thinking else tot_tok),
     }
     return records, aggregated
 
@@ -435,12 +461,14 @@ def print_per_category_summary(per_cat_summaries: dict):
           f"{'accept':>8} {'len':>6}")
     for c in sorted(per_cat_summaries.keys()):
         s = per_cat_summaries[c]
-        ar = s.get("acceptance_rate")
-        ml = s.get("mean_accept_length")
+        ov = s.get("overall", {})
+        ar = ov.get("acceptance_rate")
+        ml = ov.get("mean_accept_length")
         ar_str = f"{ar * 100:6.2f}%" if ar is not None else "  N/A "
         ml_str = f"{ml:6.3f}" if ml is not None else " N/A  "
+        out_tok = ov.get("num_output_tokens", 0)
         print(f"{c:<35} {s['num_requests']:>5} {s['num_total_turns']:>5} "
-              f"{s['num_output_tokens']:>10} {ar_str:>8} {ml_str:>6}")
+              f"{out_tok:>10} {ar_str:>8} {ml_str:>6}")
 
 
 # ---------------------------------------------------------------------------
@@ -458,9 +486,44 @@ def sanitize_filename(name: str) -> str:
     return safe[:80] if safe else "_uncategorized"
 
 
+def _phase_dict(nd, ndt, nat, ac, num_tokens, elapsed):
+    """Build a JSON-serialisable phase dict.
+
+    Per-head ``rate`` uses the cumulative definition (matches vLLM's internal
+    log in ``vllm/v1/spec_decode/metrics.py``):
+        rate[i] = acceptance_counts_per_pos[i] / num_drafts
+    i.e. fraction of drafts whose first (i+1) tokens were all accepted.
+    """
+    return {
+        "num_drafts": int(nd),
+        "num_draft_tokens": int(ndt),
+        "num_accepted_tokens": int(nat),
+        "acceptance_counts_per_pos": [int(x) for x in ac],
+        "per_head": [
+            {
+                "position": i,
+                "accepted": int(c),
+                "rate": (c / nd) if nd > 0 else None,
+            }
+            for i, c in enumerate(ac)
+        ],
+        "acceptance_rate": (nat / ndt) if ndt > 0 else None,
+        "mean_accept_length": (1 + nat / nd) if nd > 0 else None,
+        "num_output_tokens": int(num_tokens),
+        "elapsed_seconds": float(elapsed),
+        "throughput_tok_per_sec": (
+            num_tokens / elapsed if elapsed > 0 else None
+        ),
+    }
+
+
 def build_summary(args, records, result, category=None):
     """Build the JSON-serialisable summary dict for one category or the
-    overall run."""
+    overall run.
+
+    ``overall`` / ``thinking`` / ``response`` are siblings so consumers can
+    iterate them uniformly.
+    """
     nd, ndt, nat, ac = result["metrics_total"]
     summary = {
         "model": args.model_dir,
@@ -471,37 +534,23 @@ def build_summary(args, records, result, category=None):
         "num_spec_tokens": args.num_spec_tokens,
         "multi_turn": args.multi_turn,
         "enable_thinking": args.enable_thinking,
-        "num_drafts": int(nd),
-        "num_draft_tokens": int(ndt),
-        "num_accepted_tokens": int(nat),
-        "acceptance_counts_per_pos": [int(x) for x in ac],
-        "acceptance_rate": (nat / ndt) if ndt > 0 else None,
-        "mean_accept_length": (1 + nat / nd) if nd > 0 else None,
-        "num_output_tokens": int(result["num_output_tokens"]),
-        "elapsed_seconds": float(result["elapsed"]),
+        "overall": _phase_dict(
+            nd, ndt, nat, ac,
+            result["num_output_tokens"], result["elapsed"]),
     }
+    if args.enable_thinking:
+        summary["total_thinking_tokens"] = int(
+            result.get("total_thinking_tokens", 0))
+        summary["total_response_tokens"] = int(
+            result.get("total_response_tokens", 0))
     if result.get("metrics_thinking") is not None:
         nd_t, ndt_t, nat_t, ac_t, tok_t, el_t = result["metrics_thinking"]
-        summary["thinking"] = {
-            "num_drafts": int(nd_t),
-            "num_draft_tokens": int(ndt_t),
-            "num_accepted_tokens": int(nat_t),
-            "acceptance_counts_per_pos": [int(x) for x in ac_t],
-            "acceptance_rate": (nat_t / ndt_t) if ndt_t > 0 else None,
-            "num_output_tokens": int(tok_t),
-            "elapsed_seconds": float(el_t),
-        }
+        summary["thinking"] = _phase_dict(
+            nd_t, ndt_t, nat_t, ac_t, tok_t, el_t)
     if result.get("metrics_response") is not None:
         nd_r, ndt_r, nat_r, ac_r, tok_r, el_r = result["metrics_response"]
-        summary["response"] = {
-            "num_drafts": int(nd_r),
-            "num_draft_tokens": int(ndt_r),
-            "num_accepted_tokens": int(nat_r),
-            "acceptance_counts_per_pos": [int(x) for x in ac_r],
-            "acceptance_rate": (nat_r / ndt_r) if ndt_r > 0 else None,
-            "num_output_tokens": int(tok_r),
-            "elapsed_seconds": float(el_r),
-        }
+        summary["response"] = _phase_dict(
+            nd_r, ndt_r, nat_r, ac_r, tok_r, el_r)
     return summary
 
 
@@ -517,6 +566,8 @@ def merge_results(results: list[dict], spec_n: int) -> dict:
     rs_nd = rs_ndt = rs_nat = rs_tok = 0
     rs_ac = [0] * spec_n
     rs_el = 0.0
+    tot_think_tok = 0
+    tot_resp_tok = 0
     has_think = False
 
     for r in results:
@@ -528,6 +579,8 @@ def merge_results(results: list[dict], spec_n: int) -> dict:
             tot_ac[j] += ac[j]
         tot_tok += r["num_output_tokens"]
         tot_el += r["elapsed"]
+        tot_think_tok += int(r.get("total_thinking_tokens", 0))
+        tot_resp_tok += int(r.get("total_response_tokens", 0))
         if r.get("metrics_thinking") is not None:
             has_think = True
             mt = r["metrics_thinking"]
@@ -552,6 +605,8 @@ def merge_results(results: list[dict], spec_n: int) -> dict:
         "metrics_response": (
             (rs_nd, rs_ndt, rs_nat, rs_ac, rs_tok, rs_el)
             if has_think else None),
+        "total_thinking_tokens": tot_think_tok,
+        "total_response_tokens": tot_resp_tok,
     }
 
 
@@ -603,6 +658,11 @@ def parse_args():
                         help="Output directory. Each category is written to "
                              "<category>.json; aggregated metrics are written "
                              "to _summary.json.")
+    parser.add_argument("--save-prompt", action="store_true",
+                        help="Include the chat-template-rendered prompt fed "
+                             "to the LLM in each record (as a per-turn list). "
+                             "Default off; prompts can be very large in "
+                             "multi-turn mode.")
 
     return parser.parse_args()
 
@@ -686,6 +746,10 @@ def main():
                 "elapsed": raw["elapsed"],
                 "metrics_thinking": raw.get("metrics_thinking"),
                 "metrics_response": raw.get("metrics_response"),
+                "total_thinking_tokens": raw.get(
+                    "total_thinking_tokens", 0),
+                "total_response_tokens": raw.get(
+                    "total_response_tokens", 0),
             }
 
         per_cat_results.append(result)

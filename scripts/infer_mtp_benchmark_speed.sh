@@ -29,6 +29,7 @@ ENABLE_THINKING=true
 REASONING_PARSER="qwen3"
 MULTI_TURN=false
 NUM_PROMPTS=""
+SAVE_PROMPT=false
 
 # ======================== Parse Args ========================
 OVERRIDE_TOP_P=""
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --mode)               MODE="$2";                       shift 2 ;;
         --no-thinking)        ENABLE_THINKING=false;           shift ;;
         --multi-turn)         MULTI_TURN=true;                 shift ;;
+        --save-prompt)        SAVE_PROMPT=true;                shift ;;
         --help|-h)
             cat <<EOF
 Usage: $0 [OPTIONS]
@@ -84,6 +86,8 @@ Common options:
   --multi-turn               Iterate every turn (default: only turns[0])
   --mode MODE                chat or completion (default: chat)
   --no-thinking              Disable thinking mode (enabled by default)
+  --save-prompt              Save chat-template-rendered prompts in output
+                             records (default off)
 
 Sampling overrides (take precedence over temperature presets):
   --top-p, --top-k, --min-p, --presence-penalty, --repetition-penalty
@@ -189,6 +193,10 @@ fi
 
 if $MULTI_TURN; then
     CMD+=(--multi-turn)
+fi
+
+if $SAVE_PROMPT; then
+    CMD+=(--save-prompt)
 fi
 
 [ -n "$TOP_P" ]              && CMD+=(--top-p "$TOP_P")
