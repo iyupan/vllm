@@ -320,6 +320,9 @@ def print_report(args, num_prompts, total_output_tokens, total_elapsed,
     print(f"Num prompts:          {num_prompts}")
     print(f"Num spec tokens:      {args.num_spec_tokens}")
     print(f"Rejection sampling:   {args.rejection_sample_method}")
+    print(f"Draft sampling:       {args.draft_sample_method}")
+    if args.synthetic_acceptance_length is not None:
+        print(f"Synthetic accept len: {args.synthetic_acceptance_length}")
     print(f"Thinking enabled:     {args.enable_thinking}")
     print(f"Total output tokens:  {total_output_tokens}")
     print(f"Total inference time: {total_elapsed:.2f}s")
@@ -379,10 +382,14 @@ def parse_args():
     md.add_argument("--model-dir", type=str, required=True,
                     help="Model path (must support MTP)")
     md.add_argument("--num-spec-tokens", type=int, default=3)
-    md.add_argument("--rejection-sample-method", type=str, default="strict",
-                    choices=["strict", "probabilistic"],
-                    help="Draft-token verification method (default: strict). "
-                         "Probabilistic requires VLLM_USE_V2_MODEL_RUNNER=1")
+    md.add_argument("--rejection-sample-method", type=str, default="standard",
+                    choices=["standard", "synthetic", "block"],
+                    help="Draft-token verification method (default: standard)")
+    md.add_argument("--draft-sample-method", type=str, default="greedy",
+                    choices=["greedy", "probabilistic"],
+                    help="Draft sampling method (default: greedy)")
+    md.add_argument("--synthetic-acceptance-length", type=float, default=None,
+                    help="Mean acceptance length for synthetic rejection")
     md.add_argument("--tp", type=int, default=1)
     md.add_argument("--max-model-len", type=int, default=16384)
     md.add_argument("--enforce-eager", action="store_true")
@@ -425,11 +432,20 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if (args.rejection_sample_method == "probabilistic"
+    if (args.rejection_sample_method == "synthetic"
+            and args.synthetic_acceptance_length is None):
+        raise ValueError(
+            "--synthetic-acceptance-length is required when "
+            "--rejection-sample-method=synthetic")
+    if (args.rejection_sample_method != "synthetic"
+            and args.synthetic_acceptance_length is not None):
+        raise ValueError(
+            "--synthetic-acceptance-length requires "
+            "--rejection-sample-method=synthetic")
+    if (args.rejection_sample_method == "block"
             and os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1"):
         raise ValueError(
-            "Probabilistic rejection sampling requires "
-            "VLLM_USE_V2_MODEL_RUNNER=1")
+            "Block rejection sampling requires VLLM_USE_V2_MODEL_RUNNER=1")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir,
                                               trust_remote_code=True)
@@ -479,7 +495,11 @@ def main():
         "method": "mtp",
         "num_speculative_tokens": args.num_spec_tokens,
         "rejection_sample_method": args.rejection_sample_method,
+        "draft_sample_method": args.draft_sample_method,
     }
+    if args.synthetic_acceptance_length is not None:
+        speculative_config["synthetic_acceptance_length"] = (
+            args.synthetic_acceptance_length)
 
     extra_kwargs = {}
     if args.enable_thinking and args.reasoning_parser:

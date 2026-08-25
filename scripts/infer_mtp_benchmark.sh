@@ -22,7 +22,10 @@ MAX_NUM_SEQS=256
 MODE="chat"
 ENABLE_THINKING=true
 REASONING_PARSER="qwen3"
-REJECTION_SAMPLE_METHOD="strict"
+REJECTION_SAMPLE_METHOD="standard"
+DRAFT_SAMPLE_METHOD="greedy"
+SYNTHETIC_ACCEPTANCE_LENGTH=""
+MODEL_RUNNER="auto"
 
 # ======================== Parse Args ========================
 # Use OVERRIDE_* to track user-explicit overrides for sampling params.
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
         --max-num-seqs)       MAX_NUM_SEQS="$2";               shift 2 ;;
         --rejection-sample-method)
             REJECTION_SAMPLE_METHOD="$2"; shift 2 ;;
+        --draft-sample-method) DRAFT_SAMPLE_METHOD="$2";       shift 2 ;;
+        --synthetic-acceptance-length)
+            SYNTHETIC_ACCEPTANCE_LENGTH="$2"; shift 2 ;;
+        --model-runner)        MODEL_RUNNER="$2";               shift 2 ;;
         --top-p)              OVERRIDE_TOP_P="$2";             shift 2 ;;
         --top-k)              OVERRIDE_TOP_K="$2";             shift 2 ;;
         --min-p)              OVERRIDE_MIN_P="$2";             shift 2 ;;
@@ -68,14 +75,21 @@ while [[ $# -gt 0 ]]; do
             echo "  --model-dir PATH          Model directory"
             echo "  --output-base PATH        Base output directory"
             echo "  --temp FLOAT              Temperature (default: 0.6)"
-            echo "  ∫ INT     Speculative tokens (default: 2)"
+            echo "  --num-spec-tokens INT     Speculative tokens (default: 3)"
             echo "  --tp INT                  Tensor parallelism (default: 8)"
             echo "  --max-tokens INT          Max output tokens (default: 32768)"
             echo "  --max-model-len INT       Max model length (default: 262144)"
             echo "  --max-num-seqs INT        Max sequences (default: 256)"
             echo "  --rejection-sample-method MODE"
-            echo "                            strict or probabilistic (default: strict)"
+            echo "                            standard, synthetic, or block"
+            echo "                            (default: standard)"
+            echo "  --draft-sample-method MODE"
+            echo "                            greedy or probabilistic (default: greedy)"
             echo "                            probabilistic enables the V2 model runner"
+            echo "  --synthetic-acceptance-length FLOAT"
+            echo "                            Required when rejection method is synthetic"
+            echo "  --model-runner MODE       auto, v1, or v2 (default: auto)"
+            echo "                            auto selects V2 for probabilistic/block"
             echo "  --mode MODE               chat or completion (default: chat)"
             echo "  --no-thinking             Disable thinking mode (enabled by default)"
             echo "  --top-p FLOAT             Override top-p"
@@ -89,18 +103,75 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Map the v0.18 CLI values to the v0.28 configuration split between
+# rejection_sample_method and draft_sample_method.
 case "$REJECTION_SAMPLE_METHOD" in
-    strict|probabilistic) ;;
+    strict)
+        echo "Warning: rejection method 'strict' is deprecated;" \
+             "using rejection=standard, draft=greedy"
+        REJECTION_SAMPLE_METHOD="standard"
+        DRAFT_SAMPLE_METHOD="greedy"
+        ;;
+    probabilistic)
+        echo "Warning: rejection method 'probabilistic' is deprecated;" \
+             "using rejection=standard, draft=probabilistic"
+        REJECTION_SAMPLE_METHOD="standard"
+        DRAFT_SAMPLE_METHOD="probabilistic"
+        ;;
+    standard|synthetic|block) ;;
     *)
         echo "Error: invalid rejection sampling method '$REJECTION_SAMPLE_METHOD'"
-        echo "Supported: strict, probabilistic"
+        echo "Supported: standard, synthetic, block"
         exit 1
         ;;
 esac
 
-if [ "$REJECTION_SAMPLE_METHOD" = "probabilistic" ]; then
-    export VLLM_USE_V2_MODEL_RUNNER=1
+case "$DRAFT_SAMPLE_METHOD" in
+    greedy|probabilistic) ;;
+    *)
+        echo "Error: invalid draft sampling method '$DRAFT_SAMPLE_METHOD'"
+        echo "Supported: greedy, probabilistic"
+        exit 1
+        ;;
+esac
+
+case "$MODEL_RUNNER" in
+    auto|v1|v2) ;;
+    *)
+        echo "Error: invalid model runner '$MODEL_RUNNER'"
+        echo "Supported: auto, v1, v2"
+        exit 1
+        ;;
+esac
+
+if [ "$REJECTION_SAMPLE_METHOD" = "synthetic" ]; then
+    if [ -z "$SYNTHETIC_ACCEPTANCE_LENGTH" ]; then
+        echo "Error: --synthetic-acceptance-length is required with synthetic rejection"
+        exit 1
+    fi
+elif [ -n "$SYNTHETIC_ACCEPTANCE_LENGTH" ]; then
+    echo "Error: --synthetic-acceptance-length requires synthetic rejection"
+    exit 1
 fi
+
+case "$MODEL_RUNNER" in
+    v1)
+        if [ "$REJECTION_SAMPLE_METHOD" = "block" ]; then
+            echo "Error: block rejection sampling requires the V2 model runner"
+            exit 1
+        fi
+        export VLLM_USE_V2_MODEL_RUNNER=0
+        ;;
+    v2)
+        export VLLM_USE_V2_MODEL_RUNNER=1
+        ;;
+    auto)
+        if [ "$DRAFT_SAMPLE_METHOD" = "probabilistic" ] || \
+                [ "$REJECTION_SAMPLE_METHOD" = "block" ]; then
+            export VLLM_USE_V2_MODEL_RUNNER=1
+        fi
+        ;;
+esac
 
 # ======================== Temperature Presets ========================
 # Known presets; any other temp falls back to greedy-style (no sampling params).
@@ -204,9 +275,18 @@ fi
 
 FNAME="output-${THINK_TAG}-${MAX_TOKENS}-spec${NUM_SPEC_TOKENS}-temp${TEMP}"
 
-# Keep the existing strict-mode filename for backward compatibility.
-if [ "$REJECTION_SAMPLE_METHOD" != "strict" ]; then
+# Keep the standard + greedy filename compatible with previous strict runs.
+if [ "$REJECTION_SAMPLE_METHOD" != "standard" ]; then
     FNAME="${FNAME}-reject${REJECTION_SAMPLE_METHOD}"
+fi
+if [ "$DRAFT_SAMPLE_METHOD" != "greedy" ]; then
+    FNAME="${FNAME}-draft${DRAFT_SAMPLE_METHOD}"
+fi
+if [ -n "$SYNTHETIC_ACCEPTANCE_LENGTH" ]; then
+    FNAME="${FNAME}-acceptlen${SYNTHETIC_ACCEPTANCE_LENGTH}"
+fi
+if [ "$MODEL_RUNNER" != "auto" ]; then
+    FNAME="${FNAME}-runner${MODEL_RUNNER}"
 fi
 
 # Only append user-overridden sampling params (not from presets)
@@ -234,10 +314,15 @@ CMD=(
     --tp "$TP"
     --num-spec-tokens "$NUM_SPEC_TOKENS"
     --rejection-sample-method "$REJECTION_SAMPLE_METHOD"
+    --draft-sample-method "$DRAFT_SAMPLE_METHOD"
     --max-num-seqs "$MAX_NUM_SEQS"
     --temp "$TEMP"
     --save-output "$OUTPUT_FILE"
 )
+
+if [ -n "$SYNTHETIC_ACCEPTANCE_LENGTH" ]; then
+    CMD+=(--synthetic-acceptance-length "$SYNTHETIC_ACCEPTANCE_LENGTH")
+fi
 
 # MCQ format (e.g. gpqa) vs raw text-column
 if [ "$FORMAT" = "mcq" ]; then
@@ -281,6 +366,8 @@ echo "Model         : $MODEL_DIR"
 echo "Temperature   : $TEMP"
 echo "Spec tokens   : $NUM_SPEC_TOKENS"
 echo "Rejection     : $REJECTION_SAMPLE_METHOD"
+echo "Draft sampling: $DRAFT_SAMPLE_METHOD"
+echo "Model runner  : $MODEL_RUNNER (effective=${VLLM_USE_V2_MODEL_RUNNER:-auto})"
 echo "TP            : $TP"
 echo "Thinking      : $ENABLE_THINKING"
 echo "Output        : $OUTPUT_FILE"
