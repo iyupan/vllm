@@ -319,6 +319,7 @@ def print_report(args, num_prompts, total_output_tokens, total_elapsed,
     print(f"Mode:                 {args.mode}")
     print(f"Num prompts:          {num_prompts}")
     print(f"Num spec tokens:      {args.num_spec_tokens}")
+    print(f"Rejection sampling:   {args.rejection_sample_method}")
     print(f"Thinking enabled:     {args.enable_thinking}")
     print(f"Total output tokens:  {total_output_tokens}")
     print(f"Total inference time: {total_elapsed:.2f}s")
@@ -378,6 +379,10 @@ def parse_args():
     md.add_argument("--model-dir", type=str, required=True,
                     help="Model path (must support MTP)")
     md.add_argument("--num-spec-tokens", type=int, default=3)
+    md.add_argument("--rejection-sample-method", type=str, default="strict",
+                    choices=["strict", "probabilistic"],
+                    help="Draft-token verification method (default: strict). "
+                         "Probabilistic requires VLLM_USE_V2_MODEL_RUNNER=1")
     md.add_argument("--tp", type=int, default=1)
     md.add_argument("--max-model-len", type=int, default=16384)
     md.add_argument("--enforce-eager", action="store_true")
@@ -419,6 +424,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if (args.rejection_sample_method == "probabilistic"
+            and os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1"):
+        raise ValueError(
+            "Probabilistic rejection sampling requires "
+            "VLLM_USE_V2_MODEL_RUNNER=1")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir,
                                               trust_remote_code=True)
@@ -467,6 +478,7 @@ def main():
     speculative_config = {
         "method": "mtp",
         "num_speculative_tokens": args.num_spec_tokens,
+        "rejection_sample_method": args.rejection_sample_method,
     }
 
     extra_kwargs = {}

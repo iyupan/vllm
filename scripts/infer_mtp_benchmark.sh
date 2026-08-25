@@ -22,6 +22,7 @@ MAX_NUM_SEQS=256
 MODE="chat"
 ENABLE_THINKING=true
 REASONING_PARSER="qwen3"
+REJECTION_SAMPLE_METHOD="strict"
 
 # ======================== Parse Args ========================
 # Use OVERRIDE_* to track user-explicit overrides for sampling params.
@@ -42,6 +43,8 @@ while [[ $# -gt 0 ]]; do
         --max-tokens)         MAX_TOKENS="$2";                 shift 2 ;;
         --max-model-len)      MAX_MODEL_LEN="$2";              shift 2 ;;
         --max-num-seqs)       MAX_NUM_SEQS="$2";               shift 2 ;;
+        --rejection-sample-method)
+            REJECTION_SAMPLE_METHOD="$2"; shift 2 ;;
         --top-p)              OVERRIDE_TOP_P="$2";             shift 2 ;;
         --top-k)              OVERRIDE_TOP_K="$2";             shift 2 ;;
         --min-p)              OVERRIDE_MIN_P="$2";             shift 2 ;;
@@ -70,6 +73,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --max-tokens INT          Max output tokens (default: 32768)"
             echo "  --max-model-len INT       Max model length (default: 262144)"
             echo "  --max-num-seqs INT        Max sequences (default: 256)"
+            echo "  --rejection-sample-method MODE"
+            echo "                            strict or probabilistic (default: strict)"
+            echo "                            probabilistic enables the V2 model runner"
             echo "  --mode MODE               chat or completion (default: chat)"
             echo "  --no-thinking             Disable thinking mode (enabled by default)"
             echo "  --top-p FLOAT             Override top-p"
@@ -82,6 +88,19 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+case "$REJECTION_SAMPLE_METHOD" in
+    strict|probabilistic) ;;
+    *)
+        echo "Error: invalid rejection sampling method '$REJECTION_SAMPLE_METHOD'"
+        echo "Supported: strict, probabilistic"
+        exit 1
+        ;;
+esac
+
+if [ "$REJECTION_SAMPLE_METHOD" = "probabilistic" ]; then
+    export VLLM_USE_V2_MODEL_RUNNER=1
+fi
 
 # ======================== Temperature Presets ========================
 # Known presets; any other temp falls back to greedy-style (no sampling params).
@@ -185,6 +204,11 @@ fi
 
 FNAME="output-${THINK_TAG}-${MAX_TOKENS}-spec${NUM_SPEC_TOKENS}-temp${TEMP}"
 
+# Keep the existing strict-mode filename for backward compatibility.
+if [ "$REJECTION_SAMPLE_METHOD" != "strict" ]; then
+    FNAME="${FNAME}-reject${REJECTION_SAMPLE_METHOD}"
+fi
+
 # Only append user-overridden sampling params (not from presets)
 [ -n "$OVERRIDE_TOP_P" ]              && FNAME="${FNAME}-topp${OVERRIDE_TOP_P}"
 [ -n "$OVERRIDE_TOP_K" ]              && FNAME="${FNAME}-topk${OVERRIDE_TOP_K}"
@@ -209,6 +233,7 @@ CMD=(
     --max-model-len "$MAX_MODEL_LEN"
     --tp "$TP"
     --num-spec-tokens "$NUM_SPEC_TOKENS"
+    --rejection-sample-method "$REJECTION_SAMPLE_METHOD"
     --max-num-seqs "$MAX_NUM_SEQS"
     --temp "$TEMP"
     --save-output "$OUTPUT_FILE"
@@ -255,6 +280,7 @@ echo "Format        : $FORMAT"
 echo "Model         : $MODEL_DIR"
 echo "Temperature   : $TEMP"
 echo "Spec tokens   : $NUM_SPEC_TOKENS"
+echo "Rejection     : $REJECTION_SAMPLE_METHOD"
 echo "TP            : $TP"
 echo "Thinking      : $ENABLE_THINKING"
 echo "Output        : $OUTPUT_FILE"
