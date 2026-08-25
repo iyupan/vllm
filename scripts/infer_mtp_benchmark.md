@@ -36,6 +36,11 @@ bash scripts/infer_mtp_benchmark.sh --dataset gsm8k --no-thinking
 
 # 6. 显式覆盖采样参数（覆盖会写进输出文件名）
 bash scripts/infer_mtp_benchmark.sh --dataset aime25 --temp 0.6 --top-p 0.9 --top-k 50
+
+# 7. 温度 1 + 概率 draft + 标准 rejection sampling
+bash scripts/infer_mtp_benchmark.sh --dataset aime25 --temp 1.0 \
+  --rejection-sample-method standard \
+  --draft-sample-method probabilistic
 ```
 
 ## 三档温度预设（`--temp`）
@@ -62,6 +67,8 @@ bash scripts/infer_mtp_benchmark.sh --dataset aime25 --temp 0.6 --top-p 0.9 --to
 | `--max-tokens`                                                                    | `32768`                                      | 最大输出 token                      |
 | `--max-model-len`                                                                 | `262144`                                     | 最大上下文长度                      |
 | `--max-num-seqs`                                                                  | `256`                                        | 并发序列数                          |
+| `--rejection-sample-method`                                                       | `standard`                                   | 标准 rejection sampling             |
+| `--draft-sample-method`                                                           | `greedy`                                     | greedy / probabilistic draft sampling |
 | `--mode`                                                                          | `chat`                                       | chat / completion                   |
 | `--no-thinking`                                                                   | （默认开启 thinking）                        | 关闭 thinking                       |
 | `--top-p` / `--top-k` / `--min-p` / `--presence-penalty` / `--repetition-penalty` | —                                            | 显式覆盖                            |
@@ -94,6 +101,7 @@ bash scripts/infer_mtp_benchmark.sh --dataset aime25 --temp 0.6 --top-p 0.9 --to
 ## 注意事项
 
 - 脚本带 `set -euo pipefail`，未识别选项会直接报错退出。
-- `--help` 文本中 `∫ INT     Speculative tokens (default: 2)` 是显示乱码（实际是 `--num-spec-tokens`），且默认值 `2` 与代码里的 `3` 不一致——以代码为准。
+- vLLM v0.26 下 Qwen3.5 MTP 使用 V1 Model Runner；当模型目录名包含 `Qwen3.5` 时，脚本会设置 `VLLM_USE_V2_MODEL_RUNNER=0`。
+- `--rejection-sample-method probabilistic` 作为旧用法仍可用，但会转换为 `standard + draft_sample_method=probabilistic`并输出弃用警告。
 - 模型路径和 output-base 是硬编码的服务器绝对路径（`/public/panyu/...`、`/extra_panyu/...`），换机器需用 `--model-dir` / `--output-base` 覆盖。
 - 底层调用 `scripts/test_mtp_acceptance_rate_pz.py`。

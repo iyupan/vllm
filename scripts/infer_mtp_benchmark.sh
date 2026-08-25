@@ -22,7 +22,8 @@ MAX_NUM_SEQS=256
 MODE="chat"
 ENABLE_THINKING=true
 REASONING_PARSER="qwen3"
-REJECTION_SAMPLE_METHOD="strict"
+REJECTION_SAMPLE_METHOD="standard"
+DRAFT_SAMPLE_METHOD="greedy"
 
 # ======================== Parse Args ========================
 # Use OVERRIDE_* to track user-explicit overrides for sampling params.
@@ -45,6 +46,8 @@ while [[ $# -gt 0 ]]; do
         --max-num-seqs)       MAX_NUM_SEQS="$2";               shift 2 ;;
         --rejection-sample-method)
             REJECTION_SAMPLE_METHOD="$2"; shift 2 ;;
+        --draft-sample-method)
+            DRAFT_SAMPLE_METHOD="$2"; shift 2 ;;
         --top-p)              OVERRIDE_TOP_P="$2";             shift 2 ;;
         --top-k)              OVERRIDE_TOP_K="$2";             shift 2 ;;
         --min-p)              OVERRIDE_MIN_P="$2";             shift 2 ;;
@@ -68,14 +71,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --model-dir PATH          Model directory"
             echo "  --output-base PATH        Base output directory"
             echo "  --temp FLOAT              Temperature (default: 0.6)"
-            echo "  ∫ INT     Speculative tokens (default: 2)"
+            echo "  --num-spec-tokens INT     Speculative tokens (default: 3)"
             echo "  --tp INT                  Tensor parallelism (default: 8)"
             echo "  --max-tokens INT          Max output tokens (default: 32768)"
             echo "  --max-model-len INT       Max model length (default: 262144)"
             echo "  --max-num-seqs INT        Max sequences (default: 256)"
             echo "  --rejection-sample-method MODE"
-            echo "                            strict or probabilistic (default: strict)"
-            echo "                            probabilistic enables the V2 model runner"
+            echo "                            standard (default: standard)"
+            echo "  --draft-sample-method MODE"
+            echo "                            greedy or probabilistic (default: greedy)"
             echo "  --mode MODE               chat or completion (default: chat)"
             echo "  --no-thinking             Disable thinking mode (enabled by default)"
             echo "  --top-p FLOAT             Override top-p"
@@ -90,16 +94,42 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$REJECTION_SAMPLE_METHOD" in
-    strict|probabilistic) ;;
+    standard) ;;
+    # Backward-compatible aliases used by older revisions of this script.
+    strict)
+        echo "Warning: --rejection-sample-method strict is deprecated; using --rejection-sample-method standard."
+        REJECTION_SAMPLE_METHOD="standard"
+        ;;
+    probabilistic)
+        echo "Warning: --rejection-sample-method probabilistic is deprecated; use --rejection-sample-method standard --draft-sample-method probabilistic."
+        REJECTION_SAMPLE_METHOD="standard"
+        DRAFT_SAMPLE_METHOD="probabilistic"
+        ;;
     *)
         echo "Error: invalid rejection sampling method '$REJECTION_SAMPLE_METHOD'"
-        echo "Supported: strict, probabilistic"
+        echo "Supported: standard"
         exit 1
         ;;
 esac
 
-if [ "$REJECTION_SAMPLE_METHOD" = "probabilistic" ]; then
-    export VLLM_USE_V2_MODEL_RUNNER=1
+case "$DRAFT_SAMPLE_METHOD" in
+    greedy|probabilistic) ;;
+    *)
+        echo "Error: invalid draft sampling method '$DRAFT_SAMPLE_METHOD'"
+        echo "Supported: greedy, probabilistic"
+        exit 1
+        ;;
+esac
+
+# Qwen3.5 mixes GDN/Mamba-style and full-attention layers. In vLLM v0.26,
+# Model Runner V2 does not support this hybrid KV-cache layout. The V1 runner
+# supports both greedy and probabilistic MTP draft sampling. Leave runner
+# selection unchanged for other model families.
+if [[ "$(basename "$MODEL_DIR")" == *Qwen3.5* ]]; then
+    if [ "${VLLM_USE_V2_MODEL_RUNNER:-0}" = "1" ]; then
+        echo "Warning: overriding VLLM_USE_V2_MODEL_RUNNER=1; Qwen3.5 MTP requires V1 on vLLM v0.26."
+    fi
+    export VLLM_USE_V2_MODEL_RUNNER=0
 fi
 
 # ======================== Temperature Presets ========================
@@ -204,9 +234,12 @@ fi
 
 FNAME="output-${THINK_TAG}-${MAX_TOKENS}-spec${NUM_SPEC_TOKENS}-temp${TEMP}"
 
-# Keep the existing strict-mode filename for backward compatibility.
-if [ "$REJECTION_SAMPLE_METHOD" != "strict" ]; then
+# Keep the standard/greedy filename unchanged for backward compatibility.
+if [ "$REJECTION_SAMPLE_METHOD" != "standard" ]; then
     FNAME="${FNAME}-reject${REJECTION_SAMPLE_METHOD}"
+fi
+if [ "$DRAFT_SAMPLE_METHOD" != "greedy" ]; then
+    FNAME="${FNAME}-draft${DRAFT_SAMPLE_METHOD}"
 fi
 
 # Only append user-overridden sampling params (not from presets)
@@ -234,6 +267,7 @@ CMD=(
     --tp "$TP"
     --num-spec-tokens "$NUM_SPEC_TOKENS"
     --rejection-sample-method "$REJECTION_SAMPLE_METHOD"
+    --draft-sample-method "$DRAFT_SAMPLE_METHOD"
     --max-num-seqs "$MAX_NUM_SEQS"
     --temp "$TEMP"
     --save-output "$OUTPUT_FILE"
@@ -281,6 +315,7 @@ echo "Model         : $MODEL_DIR"
 echo "Temperature   : $TEMP"
 echo "Spec tokens   : $NUM_SPEC_TOKENS"
 echo "Rejection     : $REJECTION_SAMPLE_METHOD"
+echo "Draft sampling: $DRAFT_SAMPLE_METHOD"
 echo "TP            : $TP"
 echo "Thinking      : $ENABLE_THINKING"
 echo "Output        : $OUTPUT_FILE"

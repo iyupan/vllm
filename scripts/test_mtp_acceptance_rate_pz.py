@@ -320,6 +320,7 @@ def print_report(args, num_prompts, total_output_tokens, total_elapsed,
     print(f"Num prompts:          {num_prompts}")
     print(f"Num spec tokens:      {args.num_spec_tokens}")
     print(f"Rejection sampling:   {args.rejection_sample_method}")
+    print(f"Draft sampling:       {args.draft_sample_method}")
     print(f"Thinking enabled:     {args.enable_thinking}")
     print(f"Total output tokens:  {total_output_tokens}")
     print(f"Total inference time: {total_elapsed:.2f}s")
@@ -379,10 +380,14 @@ def parse_args():
     md.add_argument("--model-dir", type=str, required=True,
                     help="Model path (must support MTP)")
     md.add_argument("--num-spec-tokens", type=int, default=3)
-    md.add_argument("--rejection-sample-method", type=str, default="strict",
-                    choices=["strict", "probabilistic"],
-                    help="Draft-token verification method (default: strict). "
-                         "Probabilistic requires VLLM_USE_V2_MODEL_RUNNER=1")
+    md.add_argument("--rejection-sample-method", type=str, default="standard",
+                    choices=["standard"],
+                    help="Rejection sampling algorithm (default: standard)")
+    md.add_argument("--draft-sample-method", type=str, default="greedy",
+                    choices=["greedy", "probabilistic"],
+                    help="MTP draft sampling method (default: greedy). "
+                         "Use probabilistic for full probability-ratio "
+                         "rejection sampling")
     md.add_argument("--tp", type=int, default=1)
     md.add_argument("--max-model-len", type=int, default=16384)
     md.add_argument("--enforce-eager", action="store_true")
@@ -424,12 +429,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    if (args.rejection_sample_method == "probabilistic"
-            and os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1"):
-        raise ValueError(
-            "Probabilistic rejection sampling requires "
-            "VLLM_USE_V2_MODEL_RUNNER=1")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir,
                                               trust_remote_code=True)
@@ -479,6 +478,7 @@ def main():
         "method": "mtp",
         "num_speculative_tokens": args.num_spec_tokens,
         "rejection_sample_method": args.rejection_sample_method,
+        "draft_sample_method": args.draft_sample_method,
     }
 
     extra_kwargs = {}
@@ -509,7 +509,9 @@ def main():
 
     # ---- Run inference ----
     print(f"Running inference with MTP spec decoding "
-          f"(num_spec_tokens={args.num_spec_tokens}) ...")
+          f"(num_spec_tokens={args.num_spec_tokens}, "
+          f"rejection={args.rejection_sample_method}, "
+          f"draft={args.draft_sample_method}) ...")
 
     if args.enable_thinking:
         # ============================================================
