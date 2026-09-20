@@ -4,9 +4,13 @@ SPEED-Bench 专用的 MTP（Multi-Token Prediction）接受率测试入口脚本
 
 底层调用 `scripts/test_mtp_acceptance_rate_speed.py`。
 
+当前入口使用默认的 `rejection_sample_method=standard` 和 `draft_sample_method=greedy`，未开放这两个参数的命令行选项。
+
 ## 前置条件：准备 parquet
 
 脚本不下载 / 不解析数据，**只负责加载已经准备好的 parquet 跑评估**。
+
+parquet 中的 `turns` 必须包含真实文本；遇到未解析的 `TURNS_PLACEHOLDER` 会报错。若数据仍含占位符，需要在提供 `Dataset` / `Request` 基类的上游 SPECDEC_BENCH 环境中通过 `SPEEDBench.prepare_data` 准备。当前仓库的 `scripts/speed.py` 依赖缺失的 `.base` 模块，不能直接作为独立的数据准备入口；单纯把含占位符的数据另存为 parquet 也不会解析其内容。
 
 默认数据位置由 shell 里的 `DATA_BASE` + `SPEED_CONFIG` 拼出：
 
@@ -23,7 +27,21 @@ ${DATA_BASE}/${SPEED_CONFIG}/test.parquet
 bash scripts/infer_mtp_benchmark_speed.sh [选项]
 ```
 
+请从仓库根目录运行，并先激活通过 `uv` 创建的 `.venv`（`source .venv/bin/activate`），因为 shell 内部使用 `python` 启动推理。
+
 `--parquet-path` 可选，可以是单个 `*.parquet` 文件，也可以是包含 parquet 文件的目录。不传时默认 `${DATA_BASE}/${SPEED_CONFIG}/test.parquet`，即默认读 `/extra_panyu/data/speed/qualitative/test.parquet`（用 `--speed-config` 切换子目录、`--data-base` 切换根目录）。
+
+## 生成阶段与 token 预算
+
+默认开启 thinking。每个 category 的每个对话轮次中，`run_generation()` 都执行两次 `llm.generate()`：先生成 thinking，到 `</think>` 停止；再把 thinking 文本拼回原始 prompt，作为新请求生成 response。若第一阶段没有输出结尾的 `</think>`，脚本会手工补上。
+
+`--max-tokens` 是每个请求、每个阶段的上限，默认 thinking 和 response 各最多 32768 个 token，单轮合计上限为 65536，还受上下文长度限制。传入 `--no-thinking` 后，每个轮次只调用一次 `llm.generate()`，输出上限为 `--max-tokens`。`--mode completion` 必须同时传入 `--no-thinking`。
+
+**单轮 / 多轮指对话轮次，与单阶段 / 两阶段不同。** 默认“单轮 + thinking”仍是两阶段测试。
+
+阶段接受率按累计 counter 差值统计；`overall` 累加两阶段的计数、生成 token 数和生成耗时。第二阶段会重新提交请求，thinking 成为 prompt，presence/frequency penalty 的输出历史重新开始，所以这些结果不等同于一次连续生成 thinking + response 的结果。
+
+若要在 AIME25 / GPQA 上比较保留 thinking 的单次生成吞吐量，使用 `scripts/compare_mtp_throughput.sh`，详见[通用指南的生成阶段说明](infer_mtp_benchmark.md#生成阶段与统计口径)。该入口不读取 SPEED parquet。
 
 ## 常见用法
 
@@ -62,16 +80,20 @@ bash scripts/infer_mtp_benchmark_speed.sh \
 bash scripts/infer_mtp_benchmark_speed.sh --save-prompt
 ```
 
-## 三档温度预设（`--temp`）
+## 温度预设与实际参数（`--temp`）
 
-| temp  | top_p | top_k | min_p | presence_penalty | repetition_penalty |
-| ----- | ----- | ----- | ----- | ---------------- | ------------------ |
-| `0.0` | —     | —     | —     | —                | —                  |
-| `0.6` | 0.95  | 20    | 0.0   | 0.0              | 1.0                |
-| `1.0` | 0.95  | 20    | 0.0   | 1.5              | 1.0                |
-| 其他  | 退化为贪婪（无采样参数）                                        |
+下表列出未显式覆盖时传给 `SamplingParams` 的参数值：
 
-显式传入 `--top-p` 等参数会覆盖预设。
+| temp        | top_p | top_k | min_p | presence_penalty | repetition_penalty |
+| ----------- | ----- | ----- | ----- | ---------------- | ------------------ |
+| `0.0` / `0` | 0.95  | 20    | 0.0   | 1.5              | 1.0                |
+| `0.6`       | 0.95  | 20    | 0.0   | 0.0              | 1.0                |
+| `1.0` / `1` | 0.95  | 20    | 0.0   | 1.5              | 1.0                |
+| 其他        | 0.95  | 20    | 0.0   | 1.5              | 1.0                |
+
+shell 按字符串匹配预设；例如 `0.60` 会进入“其他”分支。对于温度 0 和“其他”分支，shell 不传额外采样参数，底层 Python 使用上表所列的默认值。temperature 仍使用传入值，例如 `--temp 0.8` 仍是随机采样，不会自动改为贪婪。
+
+温度 0 时走贪婪解码，top-p/top-k/min-p 不参与随机采样，但 presence penalty 仍可能改变 argmax；若不希望施加该惩罚，请显式传入 `--presence-penalty 0`。显式传入 `--top-p` 等参数会覆盖预设或 Python 默认值。
 
 ## 全部选项
 
@@ -85,13 +107,13 @@ bash scripts/infer_mtp_benchmark_speed.sh --save-prompt
 | `--temp`                                                                          | `0.6`                                        | 温度（见上表）                                      |
 | `--num-spec-tokens`                                                               | `3`                                          | MTP spec token 数                                   |
 | `--tp`                                                                            | `8`                                          | tensor parallel                                     |
-| `--max-tokens`                                                                    | `32768`                                      | 单次最大输出 token                                  |
+| `--max-tokens`                                                                    | `32768`                                      | 每个请求、每轮、每个生成阶段的输出 token 上限          |
 | `--max-model-len`                                                                 | `262144`                                     | 最大上下文长度                                      |
 | `--max-num-seqs`                                                                  | `256`                                        | 并发序列数                                          |
 | `--num-prompts`                                                                   | —                                            | 限制读取的 request 数（smoke test 用）              |
 | `--multi-turn`                                                                    | （默认关闭，仅用 `turns[0]`）                | 迭代所有 turn，按 chat history 累积                 |
 | `--mode`                                                                          | `chat`                                       | chat / completion                                   |
-| `--no-thinking`                                                                   | （默认开启 thinking）                        | 关闭 thinking                                       |
+| `--no-thinking`                                                                   | （默认开启 thinking）                        | 关闭 thinking，每轮改为单阶段生成                    |
 | `--save-prompt`                                                                   | （默认关闭）                                 | 把 chat-template 渲染后的 prompt 写入 records       |
 | `--top-p` / `--top-k` / `--min-p` / `--presence-penalty` / `--repetition-penalty` | —                                            | 显式覆盖                                            |
 | `--help` / `-h`                                                                   | —                                            | 打印帮助                                            |
@@ -172,12 +194,12 @@ bash scripts/infer_mtp_benchmark_speed.sh --save-prompt
 
 字段说明：
 
-- `summary.overall` / `summary.thinking` / `summary.response` 是平级三段，结构都由 `_phase_dict()` 生成（字段一致）；之前的"overall 字段铺在顶层 + thinking/response 子 dict"格式已废弃。
-- `per_head[i].rate = acceptance_counts_per_pos[i] / num_drafts`，**累积口径**（与 vLLM 内部日志 `vllm/v1/spec_decode/metrics.py:97` 一致），物理含义是"草稿至少被接受到位置 i 的概率"，必然单调不增。
+- `summary.overall` / `summary.thinking` / `summary.response` 是平级三段，结构都由 `_phase_dict()` 生成（字段一致）；`thinking` 和 `response` 仅在开启 thinking 两阶段测试时存在。之前的"overall 字段铺在顶层 + thinking/response 子 dict"格式已废弃。
+- `per_head[i].rate = acceptance_counts_per_pos[i] / num_drafts`，**累积口径**（与 `vllm/v1/spec_decode/metrics.py` 中的内部日志一致），表示前 `i+1` 个草稿 token 全部被接受的比例，必然单调不增。`position` 从 0 开始；这里按草稿位置统计，不代表独立物理预测头的命中率。
 - `acceptance_rate` 为小数（0–1），stdout 显示百分数（×100）。
 - `throughput_tok_per_sec = num_output_tokens / elapsed_seconds`。
 - 记录里 `num_output_tokens[t]` 是第 t 轮 response 的 token 数；`thinking_tokens[t]` 是第 t 轮 thinking 段的 token 数（仅 `enable_thinking` 时存在）。`summary.overall.num_output_tokens` 是 thinking + response 合计；`summary.total_thinking_tokens` / `total_response_tokens` 是分别的合计（仅 `enable_thinking` 时存在）。
-- `prompt[t]` 是第 t 轮 chat-template 渲染后实际喂给 LLM 的字符串（多轮模式下含累积 history）。**仅 `--save-prompt` 时存在**（默认关闭，因为 prompt 在多轮 + 长上下文下可能非常大）。
+- `prompt[t]` 是第 t 轮开始时的 prompt：chat 模式下经过 chat template 渲染，多轮模式下含累积 history，completion 模式下为原始文本。开启 thinking 时这里只保存第一阶段 prompt，不含第二阶段追加的 thinking 文本。**仅 `--save-prompt` 时存在**（默认关闭，因为 prompt 在多轮 + 长上下文下可能非常大）。
 
 ### 汇总 `_summary.json`
 
@@ -207,7 +229,7 @@ vLLM 的 MTP 接受率指标（`vllm:spec_decode_num_drafts` 等）是**全局�
    - 写一个 `<category>.json`
 4. `merge_results` 累加所有 category 的指标 → 写 `_summary.json`
 
-代价：每个 category 跑一次 `llm.generate` 比一次性跑全部样本略低效（vLLM batch 调度有少量启动开销），但对几十-几百条样本可以忽略。
+每个 category、每个对话轮次调用一次 `run_generation()`；开启 thinking 时它内部调用两次 `llm.generate()`，关闭时调用一次。按 category 拆分会改变批大小并增加请求处理开销，对吞吐量的影响需要实测，不能假定可以忽略。
 
 ## 单轮 vs 多轮
 
@@ -215,10 +237,11 @@ SPEED-Bench 的 `qualitative` 配置里很多数据集是**多轮对话**（MTBe
 
 | 模式            | 行为                                                          | 适用场景                                                              |
 | --------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
-| **单轮**（默认）| 只用 `turns[0]`，每条 request 推理一次                        | 与原 MTP bench 行为对齐，样本数即 request 数，便于和其他数据集对比    |
+| **单轮**（默认）| 只用 `turns[0]`，每条 request 处理一个对话轮次；thinking 开启时仍分两阶段 | 分析首轮负载，样本数即 request 数                                      |
 | **多轮**        | 按 turn index 迭代；每轮 batch 化所有"还没结束的"requests     | 完整覆盖 SPEED-Bench 多轮设计意图，能看到 multi-turn 下的接受率变化   |
 
 多轮模式下：
+
 - 每条 request 维护独立 chat history（`messages` list）
 - 每轮把 `turns[t]` 加入 history → 应用 chat template → 推理 → 把 response 加回 history
 - thinking 被剥离不进 history（符合 Qwen3 多轮规范）
@@ -229,6 +252,7 @@ SPEED-Bench 的 `qualitative` 配置里很多数据集是**多轮对话**（MTBe
 ## 注意事项
 
 - 脚本带 `set -euo pipefail`，未识别选项直接报错退出。
+- 与通用 shell 不同，此入口不设置 `VLLM_USE_V2_MODEL_RUNNER`，runner 由环境变量和 vLLM 配置选择。
 - `--parquet-path` 不传时会拼成 `${DATA_BASE}/${SPEED_CONFIG}/test.parquet`；若该路径不存在会立即退出并提示。
 - 模型路径、output-base、data-base 都是硬编码的服务器绝对路径，换机器需用 `--model-dir` / `--output-base` / `--data-base` 覆盖。
 - `--speed-config` 在自动拼路径模式下既影响默认 parquet 子目录，又影响输出目录命名；显式传 `--parquet-path` 时退化为只是输出标签，加载行为完全由 `--parquet-path` 决定（理论上可以配置不一致，但不推荐）。
@@ -307,7 +331,7 @@ shell 同步：`OUTPUT_FILE`（含 `.json`）→ `OUTPUT_RUN_DIR`（目录）。
 
 中间一度想把数据获取也内聚进 shell：先后试过 `huggingface_hub.snapshot_download` 走 `allow_patterns` 拉部分 shard、用 `datasets.load_dataset` 走 metadata 拉完整 shard、以及调 `SPEEDBench.prepare_data` 触发占位符解析。每一步都有 corner case（partial 下载、上游版本不一致、需要给 `speed.py` 补 `__init__.py + base.py` 桩才能 import 等）。
 
-最终决定回归原样：脚本只负责加载用户已经准备好的 parquet 跑评估，数据获取由用户在 README "前置条件" 里按需选 A 路（`load_dataset` + `to_parquet`）或 B 路（`SPEEDBench.prepare_data`）手动产出。这样：
+最终决定回归原样：脚本只负责加载用户已经准备好的 parquet 跑评估。已解析的数据可以另存为 parquet；含占位符的数据需要先在具备相应依赖的上游环境中解析，见本文“前置条件”。这样：
 
 - shell 不需要管 HF 缓存目录、不需要清理残留 shard、不需要兼容上游 placeholder/resolved 两种状态
 - 评估流程的边界清晰：`--parquet-path` 是契约入口，由调用方负责数据正确性
@@ -328,8 +352,8 @@ scripts/
 
 1. **单轮为默认，多轮 opt-in**：SPEED-Bench 虽然天然多轮，但单轮用法和原 bench 直接对比，多轮调试成本更高，所以保留两条路径。
 2. **复用而非复制**：通过 `sys.path` 注入从兄弟脚本导入辅助函数，避免代码漂移；副作用是两个文件之间存在隐式依赖，重命名 `test_mtp_acceptance_rate_pz.py` 时要同步改 import。
-3. **per-category 必须独立 batch**：vLLM 全局 counter 限制下没有更优方案，代价是每 category 启动开销（对几十条样本可以忽略）。
-4. **`--speed-config` 只是标签**：实际加载行为完全由 `--parquet-path` 决定，给 shell 留了一个解耦设计，便于未来在同一份 parquet 上跑不同的输出目录布局。
+3. **per-category 独立 batch**：当前实现通过分别生成、读取全局 counter 差值获得分类指标；批大小变化和额外请求处理对吞吐量的影响需要实测。
+4. **`--speed-config` 参与路径选择**：未传 `--parquet-path` 时决定默认 parquet 子目录；显式传入路径时仅作为输出目录标签，不改变数据内容。
 5. **thinking 不进多轮 history**：Qwen3 等模型的多轮规范不要求保留过往 thinking；如果以后接其他模型规范不同（要保留），改一处 `histories[i].append(...)` 即可。
 6. **数据获取留给上游**：尝试过把下载/解析内聚进 shell，发现上游 parquet 在 placeholder / resolved 之间状态不稳定，每加一种自动模式都得加一堆 corner case。最后回归"只 load 现成 parquet"，把数据正确性交给调用方。
 
@@ -339,26 +363,26 @@ scripts/
 
 ### 背景
 
-原 `build_summary()` 只写 `acceptance_counts_per_pos`（raw counts，没分母）和总 `num_output_tokens`（thinking + response 合并），看不出**每个 MTP 头自己的接受率**，也看不出 **thinking 段单独贡献了多少 token**。需要：
+原 `build_summary()` 只写 `acceptance_counts_per_pos` 原始计数和总 `num_output_tokens`（thinking + response 合并），没有直接给出每个草稿位置的接受率，也没有单独汇总 thinking token 数。需要：
 
-1. 每个 MTP 头（默认 3 头）的接受率写入输出文件。
+1. 每个草稿位置（默认 3 个）的累计接受率写入输出文件。
 2. 三段（overall / thinking / response）都给 `mean_accept_length` 和 `per_head` 接受率。
 3. thinking token 长度按 record（每轮一项）和按 summary（合计）都落盘。
 4. 加派生吞吐量字段，方便后处理对比。
 
 ### 口径
 
-per-head 接受率使用**累积口径**，与 vLLM 内部日志 `vllm/v1/spec_decode/metrics.py:97` 一致：
+per-head 接受率使用**累积口径**，与 `vllm/v1/spec_decode/metrics.py` 中的内部日志一致：
 
 ```
 rate[i] = acceptance_counts_per_pos[i] / num_drafts
 ```
 
-来源：`SpecDecodingStats.observe_draft()`（`vllm/v1/spec_decode/metrics.py:38`）在草稿被接受 k 个 token 时，对 `pos[0..k-1]` 各 +1。由于 spec decoding 是**前缀匹配**（一旦某位拒绝，后面所有位置都不再算接受），`acceptance_counts_per_pos[i]` 的物理含义是"草稿至少被接受到位置 i+1 的次数"，因此 `rate[i]` = "草稿至少被接受到位置 i 的概率"，序列必然单调不增。
+来源：`vllm/v1/spec_decode/metrics.py` 中的 `SpecDecodingStats.observe_draft()` 在草稿被接受 k 个 token 时，对 `pos[0..k-1]` 各 +1。当前 standard 验证只接受连续前缀，一旦某位拒绝，后面的草稿就不再输出。因此 `acceptance_counts_per_pos[i]` 是前 `i+1` 个草稿 token 全部被接受的次数，`rate[i]` 是该次数占总草稿轮数的比例，序列必然单调不增。
 
-> 条件接受率（给定前 i-1 个头都接受时第 i 个头的命中率）可由 `acceptance_counts_per_pos[i] / acceptance_counts_per_pos[i-1]` 反推，本次未输出。
+> 对 `i > 0`，在各轮均提出相应位置的草稿且分母非零时，给定前 `i` 个 token 已接受后的下一位置条件接受率可由 `acceptance_counts_per_pos[i] / acceptance_counts_per_pos[i-1]` 计算，本脚本未输出。动态草稿长度下还需考虑该位置是否实际被提出。
 
-### 改动（speed.py）
+### 改动（test_mtp_acceptance_rate_speed.py）
 
 1. **新增 `_phase_dict()`**：把单相位 JSON 字段构造抽出来，返回包含
    - `num_drafts` / `num_draft_tokens` / `num_accepted_tokens` / `acceptance_counts_per_pos`（旧字段保留兼容）
