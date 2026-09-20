@@ -107,6 +107,9 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+# Pin Qwen3.5 to V1, matching the framework's default for hybrid models.
+# V2 implements hybrid/MTP execution, but its probabilistic draft sampling
+# does not yet apply top-k/top-p. This comparison uses the V1 sampling path.
 if [[ "$(basename "$MODEL_DIR")" == *Qwen3.5* ]]; then
     export VLLM_USE_V2_MODEL_RUNNER=0
 fi

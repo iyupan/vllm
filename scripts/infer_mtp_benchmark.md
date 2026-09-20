@@ -132,7 +132,7 @@ shell 按字符串匹配预设；例如 `0.60` 会进入“其他”分支。对
 ## 注意事项
 
 - 脚本带 `set -euo pipefail`，未识别选项会直接报错退出。
-- vLLM v0.26 下 Qwen3.5 MTP 使用 V1 Model Runner；当模型目录名包含 `Qwen3.5` 时，脚本会设置 `VLLM_USE_V2_MODEL_RUNNER=0`。
+- 当模型目录名包含 `Qwen3.5` 时，本脚本固定设置 `VLLM_USE_V2_MODEL_RUNNER=0`，与框架对 hybrid 模型的默认选择一致，并使用已支持 draft top-k/top-p 的 V1 采样路径。当前 V2 已实现 hybrid 缓存、MTP 生成及拒绝采样，但其 probabilistic draft 仍只应用 temperature；Qwen3.5 在 V2 下的具体运行配置还需单独验证。
 - `--rejection-sample-method probabilistic` 作为旧用法仍可用，但会转换为 `standard + draft_sample_method=probabilistic`并输出弃用警告。
 - 模型路径和 output-base 是硬编码的服务器绝对路径（`/public/panyu/...`、`/extra_panyu/...`），换机器需用 `--model-dir` / `--output-base` 覆盖。
 - 底层调用 `scripts/test_mtp_acceptance_rate_pz.py`。

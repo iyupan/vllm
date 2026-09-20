@@ -889,8 +889,8 @@ def test_mtp_correctness(
 
         if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
             pytest.skip(
-                "Model Runner V2 does not yet support hybrid models "
-                "(Qwen3.5 mixes Mamba-style GDN with attention layers)."
+                "This Qwen3.5 MTP correctness test currently covers the default "
+                "V1 runner; V2 hybrid/MTP execution requires separate validation."
             )
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"

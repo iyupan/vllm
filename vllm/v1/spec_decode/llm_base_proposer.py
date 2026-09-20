@@ -42,6 +42,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     empty_exponential_noise_like,
     sample_with_exponential_noise,
 )
@@ -451,7 +452,7 @@ class SpecDecodeBaseProposer:
         # per request in a single pass, so logits has batch_size * K rows while
         # the sampling metadata is per-request. The rows are request-major
         # (K consecutive slots per request), so repeat_interleave the
-        # per-request temperature to match before probabilistic sampling.
+        # per-request sampling parameters before probabilistic sampling.
         temperature = sampling_metadata.temperature
         if temperature is not None and temperature.shape[0] != logits.shape[0]:
             assert logits.shape[0] % temperature.shape[0] == 0
@@ -459,6 +460,16 @@ class SpecDecodeBaseProposer:
             sampling_metadata = dataclasses.replace(
                 sampling_metadata,
                 temperature=temperature.repeat_interleave(factor, dim=0),
+                top_k=(
+                    sampling_metadata.top_k.repeat_interleave(factor, dim=0)
+                    if sampling_metadata.top_k is not None
+                    else None
+                ),
+                top_p=(
+                    sampling_metadata.top_p.repeat_interleave(factor, dim=0)
+                    if sampling_metadata.top_p is not None
+                    else None
+                ),
             )
 
         return compute_probs_and_sample_next_token(
@@ -1818,10 +1829,6 @@ class SpecDecodeBaseProposer:
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
 
 
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
@@ -1829,6 +1836,7 @@ def compute_probs_and_sample_next_token(
     sampling_metadata: SamplingMetadata,
     use_fp64_gumbel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample draft tokens and retain the exact proposal distribution."""
     if sampling_metadata.all_greedy:
         # For greedy requests, draft_probs is not used in rejection sampling.
         # Therefore, we can just return the logits.
@@ -1845,13 +1853,14 @@ def compute_probs_and_sample_next_token(
     if not sampling_metadata.all_random:
         is_greedy = temperature < _SAMPLING_EPS
         temperature = torch.where(is_greedy, 1.0, temperature)
+        greedy_token_ids = logits.argmax(dim=-1)
+    logits = logits.to(torch.float32)
     logits.div_(temperature.view(-1, 1))
+    logits = apply_top_k_top_p(logits, sampling_metadata.top_k, sampling_metadata.top_p)
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
+    # Other logits processors are not applied to drafts. Rejection sampling
+    # uses the exact proposal probabilities to preserve the target distribution.
 
     # TODO(woosuk): Consider seeds.
     q = empty_exponential_noise_like(probs, use_fp64_gumbel)
@@ -1860,6 +1869,5 @@ def compute_probs_and_sample_next_token(
     # will be used later for rejection sampling.
     next_token_ids = sample_with_exponential_noise(probs.clone(), q)
     if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)
     return next_token_ids, probs

@@ -121,13 +121,12 @@ case "$DRAFT_SAMPLE_METHOD" in
         ;;
 esac
 
-# Qwen3.5 mixes GDN/Mamba-style and full-attention layers. In vLLM v0.26,
-# Model Runner V2 does not support this hybrid KV-cache layout. The V1 runner
-# supports both greedy and probabilistic MTP draft sampling. Leave runner
-# selection unchanged for other model families.
+# Pin Qwen3.5 to V1, matching the framework's default for hybrid models.
+# V2 implements hybrid/MTP execution, but its probabilistic draft sampling
+# does not yet apply top-k/top-p. This benchmark uses the V1 sampling path.
 if [[ "$(basename "$MODEL_DIR")" == *Qwen3.5* ]]; then
     if [ "${VLLM_USE_V2_MODEL_RUNNER:-0}" = "1" ]; then
-        echo "Warning: overriding VLLM_USE_V2_MODEL_RUNNER=1; Qwen3.5 MTP requires V1 on vLLM v0.26."
+        echo "Warning: overriding VLLM_USE_V2_MODEL_RUNNER=1; this benchmark pins Qwen3.5 MTP to the V1 sampling path."
     fi
     export VLLM_USE_V2_MODEL_RUNNER=0
 fi
